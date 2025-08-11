@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # 全局变量
 request_count = 0
+start_time = time.time()  # 服务启动时间
 
 # 防自动化检测注入器
 class GeminiAntiDetectionInjector:
