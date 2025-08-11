@@ -9,15 +9,11 @@ import base64
 import mimetypes
 import random
 import hashlib
-import io  # 新增，用于 google-genai 文件上传
-import itertools  # 轮询计数器
-_rr_counter = itertools.count()  # 全局递增计数器
-_rr_lock = asyncio.Lock()  # 轮询锁
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, AsyncGenerator, Union, Any
 from contextlib import asynccontextmanager
 
-from google import genai
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Header, File, UploadFile, Form
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -37,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 全局变量
+start_time = time.time()
 request_count = 0
-start_time = time.time()  # 服务启动时间
 
 # 防自动化检测注入器
 class GeminiAntiDetectionInjector:
@@ -394,28 +390,38 @@ class RateLimitCache:
 
 # 健康检测功能
 async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, Any]:
-    """使用 google-genai SDK 检测单个 Gemini Key 的健康状态"""
+    """检测单个Gemini Key的健康状态"""
+    test_request = {
+        "contents": [{"role": "user", "parts": [{"text": "Test"}]}],
+        "generationConfig": {"maxOutputTokens": 1}
+    }
+
     start_time = time.time()
     try:
-        # 初始化异步客户端；每次创建确保不同 key 隔离
-        client = genai.Client(api_key=api_key)
-        # SDK 默认 httpx 超时较高，这里通过 asyncio.wait_for 施加整体超时
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model="gemini-2.5-flash",
-                contents="health check",
-                config={"max_output_tokens": 1}
-            ),
-            timeout=timeout
-        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                json=test_request,
+                headers={"x-goog-api-key": api_key}
+            )
+
         response_time = time.time() - start_time
-        # 成功调用即视为健康
-        return {
-            "healthy": True,
-            "response_time": response_time,
-            "status_code": 200,
-            "error": None
-        }
+
+        if response.status_code == 200:
+            return {
+                "healthy": True,
+                "response_time": response_time,
+                "status_code": response.status_code,
+                "error": None
+            }
+        else:
+            return {
+                "healthy": False,
+                "response_time": response_time,
+                "status_code": response.status_code,
+                "error": f"HTTP {response.status_code}"
+            }
+
     except asyncio.TimeoutError:
         return {
             "healthy": False,
@@ -437,25 +443,18 @@ async def keep_alive_ping():
     """保活函数：定期ping自己的健康检查端点"""
     try:
         render_url = os.getenv('RENDER_EXTERNAL_URL')
-        target_url = f"{render_url}/wake" if render_url else "http://localhost:8000/wake"
-        
-        # 使用标准库 aiohttp 替代 httpx
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(target_url, timeout=30) as response:
-                    if response.status == 200:
-                        logger.info(f"🟢 Keep-alive ping successful: {response.status}")
-                    else:
-                        logger.warning(f"🟡 Keep-alive ping warning: {response.status}")
-        except ImportError:
-            # 备选：使用 urllib 标准库
-            import urllib.request
-            with urllib.request.urlopen(target_url, timeout=30) as response:
-                if response.status == 200:
-                    logger.info(f"🟢 Keep-alive ping successful: {response.status}")
+        if render_url:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(f"{render_url}/wake")
+                if response.status_code == 200:
+                    logger.info(f"🟢 Keep-alive ping successful: {response.status_code}")
                 else:
-                    logger.warning(f"🟡 Keep-alive ping warning: {response.status}")
+                    logger.warning(f"🟡 Keep-alive ping warning: {response.status_code}")
+        else:
+            # 本地环境自ping
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get("http://localhost:8000/wake")
+                logger.info(f"🟢 Local keep-alive ping: {response.status_code}")
     except Exception as e:
         logger.warning(f"🔴 Keep-alive ping failed: {e}")
 
@@ -611,50 +610,83 @@ async def collect_gemini_response_directly(
     thinking_content = ""
     total_tokens = 0
     finish_reason = "stop"
-    processed_lines = 0
     start_time = time.time()
 
     try:
-        client = genai.Client(api_key=gemini_key)
-        # 使用 google-genai 的流式接口
-        genai_stream = client.aio.models.generate_content_stream(
-            model=model_name,
-            **gemini_request
-        )
-        async with asyncio.timeout(timeout):
-            async for chunk in genai_stream:
-                # chunk.candidates 列表结构与 REST 回包保持一致
-                data = chunk.to_dict()  # SDK 对象转为 dict，字段与官方 REST 保持同名
-                for candidate in data.get("candidates", []):
-                    content_data = candidate.get("content", {})
-                    parts = content_data.get("parts", [])
-                    for part in parts:
-                        if "text" in part:
-                            text = part["text"]
-                            if not text:
-                                continue
-                            total_tokens += len(text.split())
-                            is_thought = part.get("thought", False)
-                            if is_thought and not (openai_request.thinking_config and openai_request.thinking_config.include_thoughts):
-                                thinking_content += text
-                            else:
-                                if is_thought and not thinking_content:
-                                    complete_content += "**Thinking Process:**\n"
-                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                    complete_content += "\n\n**Response:**\n"
-                                complete_content += text
-                    finish_reason = candidate.get("finishReason", "stop")
-                    if finish_reason:
-                        finish_reason = map_finish_reason(finish_reason)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                    "POST",
+                    url,
+                    json=gemini_request,
+                    headers={"x-goog-api-key": gemini_key}
+            ) as response:
+                if response.status_code != 200:
+                    response_time = time.time() - start_time
+                    asyncio.create_task(
+                        update_key_performance_background(key_id, False, response_time)
+                    )
+                    error_text = await response.aread()
+                    error_msg = error_text.decode() if error_text else f"HTTP {response.status_code}"
+                    logger.error(f"Direct request failed with status {response.status_code}: {error_msg}")
+                    raise Exception(f"Direct request failed: {error_msg}")
 
+                logger.info(f"Direct response started, status: {response.status_code}")
+                processed_lines = 0
+
+                async for line in response.aiter_lines():
                     processed_lines += 1
+                    if not line:
+                        continue
+
+                    if line.startswith("data: "):
+                        json_str = line[6:]
+                        if json_str.strip() == "[DONE]":
+                            logger.info("Received [DONE] signal")
+                            break
+                        if not json_str.strip():
+                            continue
+
+                        try:
+                            data = json.loads(json_str)
+                            for candidate in data.get("candidates", []):
+                                content_data = candidate.get("content", {})
+                                parts = content_data.get("parts", [])
+
+                                for part in parts:
+                                    if "text" in part:
+                                        text = part["text"]
+                                        if not text:
+                                            continue
+
+                                        total_tokens += len(text.split())
+                                        is_thought = part.get("thought", False)
+
+                                        if is_thought and not (openai_request.thinking_config and 
+                                                             openai_request.thinking_config.include_thoughts):
+                                            thinking_content += text
+                                        else:
+                                            # 为思考过程添加标记
+                                            if is_thought and not thinking_content:
+                                                complete_content += "**Thinking Process:**\n"
+                                            elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
+                                                complete_content += "\n\n**Response:**\n"
+                                            
+                                            complete_content += text
+
+                                finish_reason = candidate.get("finishReason", "stop")
+                                if finish_reason:
+                                    finish_reason = map_finish_reason(finish_reason)
+
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"JSON decode error: {e}")
+                            continue
 
                 response_time = time.time() - start_time
                 asyncio.create_task(
                     update_key_performance_background(key_id, True, response_time)
                 )
 
-    except asyncio.TimeoutError as e:
+    except (httpx.TimeoutException, httpx.ConnectError) as e:
         logger.warning(f"Direct request timeout/connection error: {str(e)}")
         response_time = time.time() - start_time
         asyncio.create_task(
@@ -717,21 +749,45 @@ async def make_gemini_request_single_attempt(
     start_time = time.time()
 
     try:
-        client = genai.Client(api_key=gemini_key)
-        async with asyncio.timeout(timeout):
-            response_obj = await client.aio.models.generate_content(
-                model=model_name,
-                **gemini_request
-            )
-        response_time = time.time() - start_time
-        # SDK 对象转 dict
-        response_dict = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
-        asyncio.create_task(
-            update_key_performance_background(key_id, True, response_time)
-        )
-        return response_dict
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
 
-    except asyncio.TimeoutError:
+            response = await client.post(
+                gemini_url,
+                json=gemini_request,
+                headers={"x-goog-api-key": gemini_key}
+            )
+
+            response_time = time.time() - start_time
+
+            if response.status_code == 200:
+                # 请求成功，在后台更新性能指标
+                asyncio.create_task(
+                    update_key_performance_background(key_id, True, response_time)
+                )
+                return response.json()
+            else:
+                # 请求失败，立即标记为失败并抛出异常
+                asyncio.create_task(
+                    update_key_performance_background(key_id, False, response_time)
+                )
+
+                error_detail = response.json() if response.content else {"error": {"message": "Unknown error"}}
+                error_msg = error_detail.get("error", {}).get("message", f"HTTP {response.status_code}")
+
+                # 如果是429错误，则标记为速率受限
+                if response.status_code == 429:
+                    logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
+                    db.update_gemini_key_status(key_id, 'rate_limited')
+                else:
+                    logger.warning(f"Key #{key_id} failed with {response.status_code}: {error_msg}")
+
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_msg
+                )
+
+    except httpx.TimeoutException:
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
@@ -739,19 +795,21 @@ async def make_gemini_request_single_attempt(
         logger.warning(f"Key #{key_id} timeout after {response_time:.2f}s")
         raise HTTPException(status_code=504, detail="Request timeout")
 
+    except httpx.RequestError as e:
+        response_time = time.time() - start_time
+        asyncio.create_task(
+            update_key_performance_background(key_id, False, response_time)
+        )
+        logger.warning(f"Key #{key_id} request error: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Request error: {str(e)}")
+
     except Exception as e:
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
         )
-        # google-genai 会在异常中封装详细信息
-        err_msg = str(e)
-        if "rate_limit" in err_msg.lower() or "status: 429" in err_msg:
-            logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
-            db.update_gemini_key_status(key_id, 'rate_limited')
-            raise HTTPException(status_code=429, detail="Rate limited")
-        logger.error(f"Key #{key_id} request error: {err_msg}")
-        raise HTTPException(status_code=500, detail=err_msg)
+        logger.error(f"Key #{key_id} unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def make_request_with_fast_failover(
@@ -899,8 +957,10 @@ async def stream_gemini_response_single_attempt(
         model_name: str
 ) -> AsyncGenerator[bytes, None]:
     """
-    单次流式请求尝试，失败立即抛出异常，使用 google-genai SDK 实现
+    单次流式请求尝试，失败立即抛出异常
     """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
+    
     # 确定超时时间：工具调用或快速响应模式使用60秒，其他使用配置值
     has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
     is_fast_failover = await should_use_fast_failover()
@@ -913,19 +973,19 @@ async def stream_gemini_response_single_attempt(
     else:
         timeout = float(db.get_config('request_timeout', '60'))
 
-    logger.info(f"Starting single stream request to model: {model_name}")
+    logger.info(f"Starting single stream request to: {url}")
 
     start_time = time.time()
 
     try:
-        client = genai.Client(api_key=gemini_key)
-        async with asyncio.timeout(timeout):
-            genai_stream = client.aio.models.generate_content_stream(
-                model=model_name,
-                **gemini_request
-            )
-
-            if False:  # legacy httpx code disabled after migration to google-genai
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                    "POST",
+                    url,
+                    json=gemini_request,
+                    headers={"x-goog-api-key": gemini_key}
+            ) as response:
+                if response.status_code != 200:
                     response_time = time.time() - start_time
                     asyncio.create_task(
                         update_key_performance_background(key_id, False, response_time)
@@ -936,16 +996,16 @@ async def stream_gemini_response_single_attempt(
                     logger.error(f"Stream request failed with status {response.status_code}: {error_msg}")
                     raise Exception(f"Stream request failed: {error_msg}")
 
-            stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-            created = int(time.time())
-            total_tokens = 0
-            thinking_sent = False
-            has_content = False
-            processed_lines = 0
+                stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                created = int(time.time())
+                total_tokens = 0
+                thinking_sent = False
+                has_content = False
+                processed_lines = 0
 
-            logger.info(f"Stream response started, status: {response.status_code}")
+                logger.info(f"Stream response started, status: {response.status_code}")
 
-            try:
+                try:
                     async for line in response.aiter_lines():
                         processed_lines += 1
 
@@ -1099,9 +1159,7 @@ async def stream_gemini_response_single_attempt(
 
                     await rate_limiter.add_usage(model_name, 1, total_tokens)
 
-                # except Exception as e:  # 原 httpx 异常已移除
-                # Legacy httpx branch disabled after migration to google-genai
-            except Exception as e:
+                except (httpx.ReadError, httpx.RemoteProtocolError) as e:
                     logger.warning(f"Stream connection error: {str(e)}")
                     response_time = time.time() - start_time
                     asyncio.create_task(
@@ -1109,9 +1167,7 @@ async def stream_gemini_response_single_attempt(
                     )
                     raise Exception(f"Stream connection error: {str(e)}")
 
-    # except Exception as e:  # 原 httpx 超时连接异常移除
-    # Legacy httpx branch disabled after migration to google-genai
-    except Exception as e:
+    except (httpx.TimeoutException, httpx.ConnectError) as e:
         logger.warning(f"Stream timeout/connection error: {str(e)}")
         response_time = time.time() - start_time
         asyncio.create_task(
@@ -1321,27 +1377,10 @@ def init_anti_detection_config():
 
 
 async def upload_file_to_gemini(file_content: bytes, mime_type: str, filename: str, gemini_key: str) -> Optional[str]:
-    """上传文件到Gemini File API并返回fileUri（使用 google-genai SDK）"""
+    """上传文件到Gemini File API并返回fileUri"""
     try:
-        client = genai.Client(api_key=gemini_key)
-        # 使用 BytesIO 包装文件内容以便 SDK 读取
-        file_stream = io.BytesIO(file_content)
-        upload_result = await client.aio.files.upload(
-            file=file_stream,
-            config={
-                "mimeType": mime_type,
-                "displayName": filename,
-                "name": f"files/{uuid.uuid4().hex}_{filename}"
-            }
-        )
-        file_uri = getattr(upload_result, "uri", None)
-        if file_uri:
-            logger.info(f"File uploaded to Gemini successfully: {file_uri}")
-            return file_uri
-        else:
-            logger.error("No URI returned from google-genai upload result")
-            return None
-        url = f"{GEMINI_FILE_API_BASE}?key={gemini_key}"  # pyright: ignore[reportUnreachable]
+        # 构建上传请求
+        url = f"{GEMINI_FILE_API_BASE}?key={gemini_key}"
 
         # 准备multipart/form-data
         files = {
@@ -1352,8 +1391,8 @@ async def upload_file_to_gemini(file_content: bytes, mime_type: str, filename: s
             'data': (filename, file_content, mime_type)
         }
 
-        # async with httpx.AsyncClient(timeout=60.0) as client:  # 已弃用
-        response = await client.post(url, files=files)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, files=files)
 
         if response.status_code == 200:
             result = response.json()
@@ -1374,16 +1413,14 @@ async def upload_file_to_gemini(file_content: bytes, mime_type: str, filename: s
 
 
 async def delete_file_from_gemini(file_uri: str, gemini_key: str) -> bool:
-    """从Gemini File API删除文件（使用 google-genai SDK）"""
+    """从Gemini File API删除文件"""
     try:
-        client = genai.Client(api_key=gemini_key)
-        await client.aio.files.delete(name=file_uri)
-        logger.info(f"File deleted from Gemini successfully: {file_uri}")
-        return True
-    except Exception as e:
-        logger.error(f"Error deleting file from Gemini: {str(e)}")
-        return False
-        # response = await client.delete(url) # 这一行似乎是多余的，因为上面已经使用了genai SDK删除文件
+        # 从URI中提取文件名
+        file_name = file_uri.split('/')[-1]
+        url = f"{GEMINI_FILE_API_BASE}/{file_name}?key={gemini_key}"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.delete(url)
 
         if response.status_code == 200:
             logger.info(f"File deleted from Gemini successfully: {file_uri}")
@@ -2064,9 +2101,7 @@ async def select_gemini_key_and_check_limits(model_name: str, excluded_keys: set
     strategy = db.get_config('load_balance_strategy', 'adaptive')
 
     if strategy == 'round_robin':
-        async with _rr_lock:
-            idx = next(_rr_counter) % len(available_keys)
-            selected_key = available_keys[idx]
+        selected_key = available_keys[0]
     elif strategy == 'least_used':
         selected_key = available_keys[0]
     else:  # adaptive strategy
@@ -2093,7 +2128,7 @@ async def select_gemini_key_and_check_limits(model_name: str, excluded_keys: set
     }
 
 
-# 传统故障转移函数 - 使用 google-genai 替代 httpx
+# 传统故障转移函数
 async def make_gemini_request_with_retry(
         gemini_key: str,
         key_id: int,
@@ -2109,23 +2144,34 @@ async def make_gemini_request_with_retry(
     for attempt in range(max_retries):
         start_time = time.time()
         try:
-            # 使用官方 google-genai 库替代 httpx
-            client = genai.Client(api_key=gemini_key)
-            async with asyncio.timeout(timeout):
-                genai_response = await client.aio.models.generate_content(
-                    model=model_name,
-                    **gemini_request
-                )
-                
-                response_time = time.time() - start_time
-                # 更新key性能
-                db.update_key_performance(key_id, True, response_time)
-                
-                # 将genai响应格式化为与旧代码兼容的格式
-                response_json = genai_response.to_dict()
-                return response_json
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
 
-        except asyncio.TimeoutError:
+                response = await client.post(
+                    gemini_url,
+                    json=gemini_request,
+                    headers={"x-goog-api-key": gemini_key}
+                )
+
+                response_time = time.time() - start_time
+
+                if response.status_code == 200:
+                    db.update_key_performance(key_id, True, response_time)
+                    return response.json()
+                else:
+                    db.update_key_performance(key_id, False, response_time)
+                    error_detail = response.json() if response.content else {"error": {"message": "Unknown error"}}
+                    if attempt == max_retries - 1:
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=error_detail.get("error", {}).get("message", "Unknown error")
+                        )
+                    else:
+                        logger.warning(f"Request failed (attempt {attempt + 1}), retrying...")
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+
+        except httpx.TimeoutException as e:
             response_time = time.time() - start_time
             db.update_key_performance(key_id, False, response_time)
             if attempt == max_retries - 1:
@@ -2138,21 +2184,7 @@ async def make_gemini_request_with_retry(
             response_time = time.time() - start_time
             db.update_key_performance(key_id, False, response_time)
             if attempt == max_retries - 1:
-                # 提取错误消息
-                error_message = str(e)
-                status_code = 500
-                
-                # 尝试分析错误类型
-                if "429" in error_message or "rate limit" in error_message.lower():
-                    status_code = 429
-                elif "403" in error_message or "permission" in error_message.lower():
-                    status_code = 403
-                elif "404" in error_message or "not found" in error_message.lower():
-                    status_code = 404
-                elif "400" in error_message or "invalid" in error_message.lower():
-                    status_code = 400
-                
-                raise HTTPException(status_code=status_code, detail=error_message)
+                raise HTTPException(status_code=500, detail=str(e))
             else:
                 logger.warning(f"Request failed (attempt {attempt + 1}): {str(e)}, retrying...")
                 await asyncio.sleep(2 ** attempt)
@@ -2449,64 +2481,13 @@ async def stream_gemini_response(
 
     for attempt in range(max_retries):
         try:
-            client = genai.Client(api_key=gemini_key)
-            async with asyncio.timeout(timeout):
-                genai_stream = client.aio.models.generate_content_stream(
-                    model=model_name,
-                    **gemini_request
-                )
-                # 将 google-genai 流式响应包装为 SSE
-                stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-                created = int(time.time())
-                total_tokens = 0
-                thinking_sent = False
-                processed_chunks = 0
-
-                async for chunk in genai_stream:
-                    processed_chunks += 1
-                    choices = chunk.candidates or []
-                    for candidate in choices:
-                        content = candidate.content or {}
-                        parts = content.parts or []
-                        for part in parts:
-                            if hasattr(part, "text"):
-                                text = part.text
-                                if not text:
-                                    continue
-                                total_tokens += len(text.split())
-                                chunk_data = {
-                                    "id": stream_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": openai_request.model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"content": text},
-                                        "finish_reason": None
-                                    }]
-                                }
-                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
-
-                        finish_reason = getattr(candidate, "finish_reason", None)
-                        if finish_reason:
-                            finish_chunk = {
-                                "id": stream_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": openai_request.model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": map_finish_reason(finish_reason)
-                                }]
-                            }
-                            yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
-                            yield "data: [DONE]\n\n".encode('utf-8')
-
-                            response_time = time.time() - start_time
-                            db.update_key_performance(key_id, True, response_time)
-                            await rate_limiter.add_usage(model_name, 1, total_tokens)
-                            return
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                        "POST",
+                        url,
+                        json=gemini_request,
+                        headers={"x-goog-api-key": gemini_key}
+                ) as response:
                     if response.status_code != 200:
                         response_time = time.time() - start_time
                         db.update_key_performance(key_id, False, response_time)
@@ -2734,7 +2715,7 @@ async def stream_gemini_response(
                         yield "data: [DONE]\n\n".encode('utf-8')
                         return
 
-                    except Exception as e:  # 原 httpx 异常移除
+                    except (httpx.ReadError, httpx.RemoteProtocolError) as e:
                         logger.warning(f"Stream connection error (attempt {attempt + 1}): {str(e)}")
                         response_time = time.time() - start_time
                         db.update_key_performance(key_id, False, response_time)
@@ -2749,7 +2730,7 @@ async def stream_gemini_response(
                             yield "data: [DONE]\n\n".encode('utf-8')
                             return
 
-        except Exception as e:  # 原 httpx 超时异常已移除
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
             logger.warning(f"Connection error (attempt {attempt + 1}): {str(e)}")
             response_time = time.time() - start_time
             db.update_key_performance(key_id, False, response_time)
