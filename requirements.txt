@@ -1,0 +1,22 @@
+# 核心 API 服务依赖
+fastapi==0.108.0
+uvicorn==0.25.0
+aiohttp>=3.9.3  # 替代 httpx
+pydantic>=2.0.0,<3.0.0
+APScheduler==3.10.4
+psutil==5.9.6
+aiofiles==23.2.1
+
+# 前端管理界面依赖
+pandas>=2.2.0
+plotly>=5.18.0
+streamlit>=1.29.0
+
+# HTTP 客户端（用于 Streamlit）
+requests==2.31.0
+
+# 文件上传支持
+python-multipart==0.0.6
+
+# Gemini 2.5 多模态支持
+google-genai>=0.5.0

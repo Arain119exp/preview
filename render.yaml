@@ -1,0 +1,76 @@
+# Gemini API 代理服务一键部署配置
+# 支持前后端同时部署到 Render 免费层
+services:
+  # 后端 API 服务 (FastAPI)
+  - type: web
+    name: gemini-api-proxy
+    env: python
+    plan: free
+    region: oregon  # 美国西海岸，对中国访问友好
+    
+    # 构建配置
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt
+    startCommand: python run_server.py
+    
+    # 健康检查和部署配置
+    healthCheckPath: /health
+    autoDeploy: true
+    
+    # 环境变量
+    envVars:
+      - key: PYTHONPATH
+        value: .
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+
+  # 前端管理界面 (Streamlit)  
+  - type: web
+    name: gemini-proxy-admin
+    env: python
+    plan: free
+    region: oregon
+    
+    # 构建配置
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt
+    startCommand: streamlit run main.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --server.enableXsrfProtection false --server.enableCORS false
+    
+    # 健康检查
+    autoDeploy: true
+    
+    # 环境变量
+    envVars:
+      # 手动构建API URL - 用户需要在部署后手动设置
+      - key: API_BASE_URL
+        sync: false  # 需要手动设置
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      - key: STREAMLIT_SERVER_ENABLE_CORS
+        value: "false"
+
+# 环境组配置（用于共享环境变量）
+envVarGroups:
+  - name: python-common
+    envVars:
+      - key: TZ
+        value: Asia/Shanghai
+      - key: LANG
+        value: en_US.UTF-8
+      - key: LC_ALL
+        value: en_US.UTF-8
+
+# 可选：数据库配置（如果需要PostgreSQL替代SQLite）
+# databases:
+#   - name: gemini-proxy-db
+#     databaseName: gemini_proxy
+#     user: gemini_user
+#     plan: free
