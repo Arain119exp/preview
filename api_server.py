@@ -636,7 +636,7 @@ async def collect_gemini_response_directly(
         # 使用 google-genai 的流式接口
         genai_stream = client.aio.models.generate_content_stream(
             model=model_name,
-            **gemini_request
+            body=gemini_request
         )
         async with asyncio.timeout(timeout):
             async for chunk in genai_stream:
@@ -937,9 +937,11 @@ async def stream_gemini_response_single_attempt(
     try:
         client = get_cached_client(gemini_key)
         async with asyncio.timeout(timeout):
+            contents = gemini_request["contents"]
+            # 流式接口直接使用contents和body参数
             genai_stream = client.aio.models.generate_content_stream(
                 model=model_name,
-                **gemini_request
+                body=gemini_request
             )
 
             if False:  # legacy httpx code disabled after migration to google-genai
@@ -2474,7 +2476,7 @@ async def stream_gemini_response(
             async with asyncio.timeout(timeout):
                 genai_stream = client.aio.models.generate_content_stream(
                     model=model_name,
-                    **gemini_request
+                    body=gemini_request
                 )
                 # 将 google-genai 流式响应包装为 SSE
                 stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
