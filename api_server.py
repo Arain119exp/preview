@@ -1922,24 +1922,28 @@ def openai_to_gemini(request: ChatCompletionRequest, enable_anti_detection: bool
                 "parts": parts
             })
 
+    thinking_config = get_thinking_config(request)
+
+    thinking_cfg_obj = None
+    if thinking_config:
+        thinking_cfg_obj = types.ThinkingConfig(
+            thinking_budget=thinking_config.get("thinkingBudget"),
+            include_thoughts=thinking_config.get("includeThoughts")
+        )
+
+    generation_config = types.GenerationConfig(
+        temperature=request.temperature,
+        top_p=request.top_p,
+        candidate_count=request.n,
+        thinking_config=thinking_cfg_obj,
+        max_output_tokens=request.max_tokens,
+        stop_sequences=request.stop
+    )
+
     gemini_request = {
         "contents": contents,
-        "generationConfig": {
-            "temperature": request.temperature,
-            "topP": request.top_p,
-            "candidateCount": request.n,
-        }
+        "generation_config": generation_config
     }
-
-    thinking_config = get_thinking_config(request)
-    if thinking_config:
-        gemini_request["generationConfig"]["thinkingConfig"] = thinking_config
-
-    if request.max_tokens:
-        gemini_request["generationConfig"]["maxOutputTokens"] = request.max_tokens
-
-    if request.stop:
-        gemini_request["generationConfig"]["stopSequences"] = request.stop
 
     return gemini_request
 
