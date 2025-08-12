@@ -631,12 +631,12 @@ async def collect_gemini_response_directly(
     try:
         client = get_cached_client(gemini_key)
         # 使用 google-genai 的流式接口
-        genai_stream = client.aio.models.generate_content_stream(
-            model=model_name,
-            contents=gemini_request["contents"],
-            config=gemini_request.get("generation_config")
-        )
         async with asyncio.timeout(timeout):
+            genai_stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=gemini_request["contents"],
+                config=gemini_request.get("generation_config")
+            )
             async for chunk in genai_stream:
                 # chunk.candidates 列表结构与 REST 回包保持一致
                 data = chunk.to_dict()  # SDK 对象转为 dict，字段与官方 REST 保持同名
@@ -937,7 +937,7 @@ async def stream_gemini_response_single_attempt(
         async with asyncio.timeout(timeout):
             contents = gemini_request["contents"]
             # 流式接口直接使用contents和body参数
-            genai_stream = client.aio.models.generate_content_stream(
+            genai_stream = await client.aio.models.generate_content_stream(
                 model=model_name,
                 contents=gemini_request["contents"],
                 config=gemini_request.get("generation_config")
@@ -2419,7 +2419,7 @@ async def stream_gemini_response(
         try:
             client = genai.Client(api_key=gemini_key)
             async with asyncio.timeout(timeout):
-                genai_stream = client.aio.models.generate_content_stream(
+                genai_stream = await client.aio.models.generate_content_stream(
                     model=model_name,
                     contents=gemini_request["contents"],
                     config=gemini_request.get("generation_config")
