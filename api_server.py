@@ -44,6 +44,9 @@ start_time = time.time()  # 服务启动时间
 # GenAI Client 缓存
 _client_cache: Dict[str, genai.Client] = {}
 
+# 并发控制：限制同时最多 2 个聊天请求
+chat_semaphore = asyncio.Semaphore(2)
+
 def get_cached_client(api_key: str) -> genai.Client:
     """按 key 复用 google-genai Client，减小握手 & 日志开销"""
     client = _client_cache.get(api_key)
@@ -1343,7 +1346,7 @@ async def upload_file_to_gemini(file_content: bytes, mime_type: str, filename: s
 async def delete_file_from_gemini(file_uri: str, gemini_key: str) -> bool:
     """从Gemini File API删除文件（使用 google-genai SDK）"""
     try:
-        client = genai.Client(api_key=gemini_key)
+        client = get_cached_client(gemini_key)
         await client.aio.files.delete(name=file_uri)
         logger.info(f"File deleted from Gemini successfully: {file_uri}")
         return True
@@ -2097,8 +2100,8 @@ async def make_gemini_request_with_retry(
     for attempt in range(max_retries):
         start_time = time.time()
         try:
-            # 使用官方 google-genai 库替代 httpx
-            client = genai.Client(api_key=gemini_key)
+            # 复用缓存 client，避免重复创建
+            client = get_cached_client(gemini_key)
             async with asyncio.timeout(timeout):
                 genai_response = await client.aio.models.generate_content(
                     model=model_name,
@@ -2438,7 +2441,7 @@ async def stream_gemini_response(
 
     for attempt in range(max_retries):
         try:
-            client = genai.Client(api_key=gemini_key)
+            client = get_cached_client(gemini_key)
             async with asyncio.timeout(timeout):
                 genai_stream = await client.aio.models.generate_content_stream(
                     model=model_name,
@@ -3000,6 +3003,7 @@ async def upload_file(
         - 大于20MB的文件将自动上传到Gemini File API。
     - **返回**: 返回一个文件对象，其中包含一个唯一的 `file_id`，可在对话中引用。
     """
+    await chat_semaphore.acquire()
     try:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -3092,6 +3096,8 @@ async def upload_file(
     except Exception as e:
         logger.error(f"File upload failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        chat_semaphore.release()
 
 
 @app.get("/v1/files", summary="列出已上传的文件", tags=["用户 API"])
@@ -3242,6 +3248,7 @@ async def chat_completions(
     - 流式响应
     - 高级功能如思考模式和提示词注入
     """
+    await chat_semaphore.acquire()
     try:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -3375,6 +3382,8 @@ async def chat_completions(
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        chat_semaphore.release()
 
 
 @app.get("/v1/models", summary="列出可用模型", tags=["用户 API"])
