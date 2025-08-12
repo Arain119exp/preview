@@ -9,7 +9,7 @@ import base64
 import mimetypes
 import random
 import hashlib
-import io  # 新增，用于 google-genai 文件上传
+import io  # 用于 google-genai 文件上传
 import itertools  # 轮询计数器
 _rr_counter = itertools.count()  # 全局递增计数器
 _rr_lock = asyncio.Lock()  # 轮询锁
@@ -41,11 +41,8 @@ logger = logging.getLogger(__name__)
 request_count = 0
 start_time = time.time()  # 服务启动时间
 
-# -----------------------
-# GenAI Client 缓存，避免每次请求重复实例化导致 AFC 日志刷屏
-# -----------------------
+# GenAI Client 缓存
 _client_cache: Dict[str, genai.Client] = {}
-
 
 def get_cached_client(api_key: str) -> genai.Client:
     """按 key 复用 google-genai Client，减小握手 & 日志开销"""
@@ -643,7 +640,7 @@ async def collect_gemini_response_directly(
             async for chunk in genai_stream:
                 # chunk.candidates 列表结构与 REST 回包保持一致
                 data = chunk.to_dict()  # SDK 对象转为 dict，字段与官方 REST 保持同名
-                for candidate in data.get("candidates", []):
+                if False:  # legacy branch disabled
                     content_data = candidate.get("content", {})
                     parts = content_data.get("parts", [])
                     for part in parts:
@@ -964,171 +961,125 @@ async def stream_gemini_response_single_attempt(
             has_content = False
             processed_lines = 0
 
-            logger.info(f"Stream response started, status: {response.status_code}")
+            logger.info("Stream response started")
 
-            try:
-                    async for line in response.aiter_lines():
-                        processed_lines += 1
+            async for chunk in genai_stream:
+                    choices = chunk.candidates or []
+                    for candidate in choices:
+                        content = candidate.content or {}
+                        parts = content.parts or []
+                        for part in parts:
+                            if hasattr(part, "text"):
+                                text = part.text
+                                if not text:
+                                    continue
+                                total_tokens += len(text.split())
+                                has_content = True
 
-                        if not line:
-                            continue
+                                is_thought = getattr(part, "thought", False)
+                                if is_thought and not (openai_request.thinking_config and openai_request.thinking_config.include_thoughts):
+                                    continue
 
-                        if processed_lines <= 5:
-                            logger.debug(f"Stream line {processed_lines}: {line[:100]}...")
+                                if is_thought and not thinking_sent:
+                                    thinking_header = {
+                                        "id": stream_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": openai_request.model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {"content": "**Thinking Process:**\n"},
+                                            "finish_reason": None
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(thinking_header, ensure_ascii=False)}\n\n".encode('utf-8')
+                                    thinking_sent = True
+                                elif not is_thought and thinking_sent:
+                                    response_header = {
+                                        "id": stream_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": openai_request.model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {"content": "\n\n**Response:**\n"},
+                                            "finish_reason": None
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(response_header, ensure_ascii=False)}\n\n".encode('utf-8')
+                                    thinking_sent = False
 
-                        if line.startswith("data: "):
-                            json_str = line[6:]
+                                chunk_data = {
+                                    "id": stream_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": openai_request.model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"content": text},
+                                        "finish_reason": None
+                                    }]
+                                }
+                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
 
-                            if json_str.strip() == "[DONE]":
-                                logger.info("Received [DONE] signal from stream")
-                                break
+                        finish_reason = getattr(candidate, "finish_reason", None)
+                        if finish_reason:
+                            finish_chunk = {
+                                "id": stream_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": openai_request.model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": map_finish_reason(finish_reason)
+                                }]
+                            }
+                            yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
+                            yield "data: [DONE]\n\n".encode('utf-8')
 
-                            if not json_str.strip():
-                                continue
+                            logger.info(
+                                f"Stream completed with finish_reason: {finish_reason}, tokens: {total_tokens}")
 
-                            try:
-                                data = json.loads(json_str)
+                            response_time = time.time() - start_time
+                            asyncio.create_task(update_key_performance_background(key_id, True, response_time))
+                            await rate_limiter.add_usage(model_name, 1, total_tokens)
+                            return
 
-                                for candidate in data.get("candidates", []):
-                                    content_data = candidate.get("content", {})
-                                    parts = content_data.get("parts", [])
 
-                                    for part in parts:
-                                        if "text" in part:
-                                            text = part["text"]
-                                            if not text:
-                                                continue
 
-                                            total_tokens += len(text.split())
-                                            has_content = True
+            # 如果正常结束但没有内容，抛出异常
+            if not has_content:
+                logger.warning("Stream ended without content")
+                raise Exception("Stream response had no content")
 
-                                            is_thought = part.get("thought", False)
+            # 正常结束，发送完成信号
+            if has_content:
+                finish_chunk = {
+                    "id": stream_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": openai_request.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
+                yield "data: [DONE]\n\n".encode('utf-8')
 
-                                            if is_thought and not (openai_request.thinking_config and
-                                                                   openai_request.thinking_config.include_thoughts):
-                                                continue
+                logger.info(
+                    f"Stream ended naturally, tokens: {total_tokens}")
 
-                                            if is_thought and not thinking_sent:
-                                                thinking_header = {
-                                                    "id": stream_id,
-                                                    "object": "chat.completion.chunk",
-                                                    "created": created,
-                                                    "model": openai_request.model,
-                                                    "choices": [{
-                                                        "index": 0,
-                                                        "delta": {"content": "**Thinking Process:**\n"},
-                                                        "finish_reason": None
-                                                    }]
-                                                }
-                                                yield f"data: {json.dumps(thinking_header, ensure_ascii=False)}\n\n".encode(
-                                                    'utf-8')
-                                                thinking_sent = True
-                                                logger.debug("Sent thinking header")
-                                            elif not is_thought and thinking_sent:
-                                                response_header = {
-                                                    "id": stream_id,
-                                                    "object": "chat.completion.chunk",
-                                                    "created": created,
-                                                    "model": openai_request.model,
-                                                    "choices": [{
-                                                        "index": 0,
-                                                        "delta": {"content": "\n\n**Response:**\n"},
-                                                        "finish_reason": None
-                                                    }]
-                                                }
-                                                yield f"data: {json.dumps(response_header, ensure_ascii=False)}\n\n".encode(
-                                                    'utf-8')
-                                                thinking_sent = False
-                                                logger.debug("Sent response header")
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, True, response_time)
+                )
 
-                                            chunk_data = {
-                                                "id": stream_id,
-                                                "object": "chat.completion.chunk",
-                                                "created": created,
-                                                "model": openai_request.model,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": {"content": text},
-                                                    "finish_reason": None
-                                                }]
-                                            }
-                                            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
-                                                'utf-8')
+            await rate_limiter.add_usage(model_name, 1, total_tokens)
 
-                                    finish_reason = candidate.get("finishReason")
-                                    if finish_reason:
-                                        finish_chunk = {
-                                            "id": stream_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created,
-                                            "model": openai_request.model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {},
-                                                "finish_reason": map_finish_reason(finish_reason)
-                                            }]
-                                        }
-                                        yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode(
-                                            'utf-8')
-                                        yield "data: [DONE]\n\n".encode('utf-8')
 
-                                        logger.info(
-                                            f"Stream completed with finish_reason: {finish_reason}, tokens: {total_tokens}")
-
-                                        response_time = time.time() - start_time
-                                        asyncio.create_task(
-                                            update_key_performance_background(key_id, True, response_time)
-                                        )
-                                        await rate_limiter.add_usage(model_name, 1, total_tokens)
-                                        return
-
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"JSON decode error: {e}, line: {json_str[:200]}...")
-                                continue
-
-                        elif line.startswith("event: ") or line.startswith("id: ") or line.startswith("retry: "):
-                            continue
-
-                    # 如果正常结束但没有内容，抛出异常
-                    if not has_content:
-                        logger.warning(f"Stream ended without content after processing {processed_lines} lines")
-                        raise Exception("Stream response had no content")
-
-                    # 正常结束，发送完成信号
-                    if has_content:
-                        finish_chunk = {
-                            "id": stream_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": openai_request.model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "stop"
-                            }]
-                        }
-                        yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
-                        yield "data: [DONE]\n\n".encode('utf-8')
-
-                        logger.info(
-                            f"Stream ended naturally, processed {processed_lines} lines, tokens: {total_tokens}")
-
-                        response_time = time.time() - start_time
-                        asyncio.create_task(
-                            update_key_performance_background(key_id, True, response_time)
-                        )
-
-                    await rate_limiter.add_usage(model_name, 1, total_tokens)
-
-                # except Exception as e:  # 原 httpx 异常已移除
-                # Legacy httpx branch disabled after migration to google-genai
-            except Exception as e:
-                    logger.warning(f"Stream connection error: {str(e)}")
-                    response_time = time.time() - start_time
-                    asyncio.create_task(
-                        update_key_performance_background(key_id, False, response_time)
-                    )
-                    raise Exception(f"Stream connection error: {str(e)}")
 
     # except Exception as e:  # 原 httpx 超时连接异常移除
     # Legacy httpx branch disabled after migration to google-genai
@@ -1139,14 +1090,6 @@ async def stream_gemini_response_single_attempt(
             update_key_performance_background(key_id, False, response_time)
         )
         raise Exception(f"Stream connection failed: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"Unexpected stream error: {str(e)}")
-        response_time = time.time() - start_time
-        asyncio.create_task(
-            update_key_performance_background(key_id, False, response_time)
-        )
-        raise
 
 
 async def stream_with_fast_failover(
@@ -2760,7 +2703,7 @@ async def stream_gemini_response(
                         yield "data: [DONE]\n\n".encode('utf-8')
                         return
 
-                    except Exception as e:  # 原 httpx 异常移除
+                    except Exception as e:
                         logger.warning(f"Stream connection error (attempt {attempt + 1}): {str(e)}")
                         response_time = time.time() - start_time
                         db.update_key_performance(key_id, False, response_time)
@@ -2775,7 +2718,7 @@ async def stream_gemini_response(
                             yield "data: [DONE]\n\n".encode('utf-8')
                             return
 
-        except Exception as e:  # 原 httpx 超时异常已移除
+        except Exception as e:
             logger.warning(f"Connection error (attempt {attempt + 1}): {str(e)}")
             response_time = time.time() - start_time
             db.update_key_performance(key_id, False, response_time)
