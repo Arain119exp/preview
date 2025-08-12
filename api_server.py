@@ -1892,13 +1892,17 @@ def openai_to_gemini(request: ChatCompletionRequest, enable_anti_detection: bool
             include_thoughts=thinking_config.get("includeThoughts")
         )
 
+    # 默认禁用 AFC，减少后台远程调用次数，可按需调整 max_remote_calls
+    afc_obj = types.AutomaticFunctionCallingConfig(disable=True)
+
     generation_config = types.GenerateContentConfig(
         temperature=request.temperature,
         top_p=request.top_p,
         candidate_count=request.n,
         thinking_config=thinking_cfg_obj,
         max_output_tokens=request.max_tokens,
-        stop_sequences=request.stop
+        stop_sequences=request.stop,
+        automatic_function_calling=afc_obj
     )
 
     gemini_request = {
