@@ -417,7 +417,8 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
                 model="gemini-2.5-flash",
                 contents="Hello",
                 config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                 )
             ),
             timeout=timeout
@@ -737,7 +738,8 @@ async def make_gemini_request_single_attempt(
         async with asyncio.timeout(timeout):
             response_obj = await client.aio.models.generate_content(
                 model=model_name,
-                **gemini_request
+                contents=gemini_request["contents"],
+                config=gemini_request["generation_config"]
             )
         response_time = time.time() - start_time
         # SDK 对象转 dict
@@ -2100,7 +2102,8 @@ async def make_gemini_request_with_retry(
             async with asyncio.timeout(timeout):
                 genai_response = await client.aio.models.generate_content(
                     model=model_name,
-                    **gemini_request
+                    contents=gemini_request["contents"],
+                    config=gemini_request["generation_config"]
                 )
                 
                 response_time = time.time() - start_time
