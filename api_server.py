@@ -1504,7 +1504,7 @@ async def lifespan(app: FastAPI):
 
     # 关闭时的操作
     if scheduler:
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
         logger.info("Scheduler shutdown")
 
     # 关闭并清理所有缓存的 genai.Client，避免未关闭的 aiohttp 会话
