@@ -645,27 +645,27 @@ async def collect_gemini_response_directly(
                 # chunk.candidates 列表结构与 REST 回包保持一致
                 # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
                 data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
-                if False:  # legacy branch disabled
+                for candidate in data.get("candidates", []):
                     content_data = candidate.get("content", {})
                     parts = content_data.get("parts", [])
                     for part in parts:
-                        if "text" in part:
-                            text = part["text"]
-                            if not text:
-                                continue
-                            total_tokens += len(text.split())
-                            is_thought = part.get("thought", False)
-                            if is_thought and not (openai_request.thinking_config and openai_request.thinking_config.include_thoughts):
-                                thinking_content += text
-                            else:
-                                if is_thought and not thinking_content:
-                                    complete_content += "**Thinking Process:**\n"
-                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                    complete_content += "\n\n**Response:**\n"
-                                complete_content += text
-                    finish_reason = candidate.get("finishReason", "stop")
-                    if finish_reason:
-                        finish_reason = map_finish_reason(finish_reason)
+                        text = part.get("text", "")
+                        if not text:
+                            continue
+                        total_tokens += len(text.split())
+                        is_thought = part.get("thought", False)
+                        include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
+                        if is_thought and not include_thoughts:
+                            # 仅记录思考，不直接输出
+                            thinking_content += text
+                        else:
+                            if is_thought and not thinking_content and not complete_content:
+                                complete_content += "**Thinking Process:**\n"
+                            elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
+                                complete_content += "\n\n**Response:**\n"
+                            complete_content += text
+                    finish_reason_raw = candidate.get("finishReason", "stop")
+                    finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
 
                     processed_lines += 1
 
