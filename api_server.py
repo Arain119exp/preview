@@ -636,7 +636,8 @@ async def collect_gemini_response_directly(
         # 使用 google-genai 的流式接口
         genai_stream = client.aio.models.generate_content_stream(
             model=model_name,
-            body=gemini_request
+            contents=gemini_request["contents"],
+            config=gemini_request.get("generation_config")
         )
         async with asyncio.timeout(timeout):
             async for chunk in genai_stream:
@@ -941,7 +942,8 @@ async def stream_gemini_response_single_attempt(
             # 流式接口直接使用contents和body参数
             genai_stream = client.aio.models.generate_content_stream(
                 model=model_name,
-                body=gemini_request
+                contents=gemini_request["contents"],
+                config=gemini_request.get("generation_config")
             )
 
             if False:  # legacy httpx code disabled after migration to google-genai
@@ -1933,7 +1935,7 @@ def openai_to_gemini(request: ChatCompletionRequest, enable_anti_detection: bool
             include_thoughts=thinking_config.get("includeThoughts")
         )
 
-    generation_config = types.GenerationConfig(
+    generation_config = types.GenerateContentConfig(
         temperature=request.temperature,
         top_p=request.top_p,
         candidate_count=request.n,
@@ -2476,7 +2478,8 @@ async def stream_gemini_response(
             async with asyncio.timeout(timeout):
                 genai_stream = client.aio.models.generate_content_stream(
                     model=model_name,
-                    body=gemini_request
+                    contents=gemini_request["contents"],
+                    config=gemini_request.get("generation_config")
                 )
                 # 将 google-genai 流式响应包装为 SSE
                 stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
