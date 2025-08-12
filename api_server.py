@@ -639,7 +639,8 @@ async def collect_gemini_response_directly(
             )
             async for chunk in genai_stream:
                 # chunk.candidates 列表结构与 REST 回包保持一致
-                data = chunk.to_dict()  # SDK 对象转为 dict，字段与官方 REST 保持同名
+                # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
+                data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
                 if False:  # legacy branch disabled
                     content_data = candidate.get("content", {})
                     parts = content_data.get("parts", [])
@@ -1500,6 +1501,19 @@ async def lifespan(app: FastAPI):
     if scheduler:
         scheduler.shutdown(wait=False)
         logger.info("Scheduler shutdown")
+
+    # 关闭并清理所有缓存的 genai.Client，避免未关闭的 aiohttp 会话
+    for cache_key, cached_client in _client_cache.items():
+        try:
+            if hasattr(cached_client, "close_async") and asyncio.iscoroutinefunction(cached_client.close_async):
+                await cached_client.close_async()
+            elif hasattr(cached_client, "close"):
+                cached_client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close genai client for key {cache_key}: {e}")
+    _client_cache.clear()
+    logger.info("Closed all genai.Client sessions")
+
     logger.info("API Server shutting down...")
 
 
