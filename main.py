@@ -2771,7 +2771,7 @@ elif page == "系统设置":
         ''', unsafe_allow_html=True)
 
         with st.form("inject_prompt_form"):
-
+            col1, col2 = st.columns([1, 1])
 
             with col1:
                 st.markdown("**注入配置**")
@@ -2869,6 +2869,7 @@ elif page == "系统设置":
             col1, col2 = st.columns([1, 1])
 
             with col1:
+                st.markdown("**流式输出模式**")
 
                 mode_options = {
                     'auto': '自动模式',
@@ -2892,19 +2893,14 @@ elif page == "系统设置":
                     'non_stream': '非流式'
                 }
                 current_stg_mode = stats_data.get('stream_to_gemini_mode_config', {}).get('mode', 'stream')
-                st.markdown("**向 Gemini 请求模式**")
                 selected_stg_mode = st.selectbox(
-                    "向 Gemini 请求模式",
+                    "流式请求模式",
                     options=list(gemini_mode_options.keys()),
                     format_func=lambda x: gemini_mode_options[x],
                     index=list(gemini_mode_options.keys()).index(current_stg_mode if current_stg_mode in gemini_mode_options else 'stream'),
                     help="选择与 Gemini 通信时的流式策略"
                 )
-        
-        
-                
-
-
+    
 
             if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 update_data_stream = {"mode": selected_mode}
