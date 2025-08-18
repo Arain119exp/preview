@@ -2892,8 +2892,23 @@ elif page == "系统设置":
 
                 st.info(mode_descriptions[selected_mode])
 
-            # 性能影响说明
-            st.markdown("**性能影响**")
+            # -------- 流式请求模式（向 Gemini） --------
+            st.markdown("**流式请求模式（向 Gemini）**")
+            request_mode_options = {
+                'stream': '流式',
+                'non_stream': '非流式'
+            }
+
+            selected_request_mode = st.selectbox(
+                "流式请求模式",
+                options=list(request_mode_options.keys()),
+                format_func=lambda x: request_mode_options[x],
+                index=list(request_mode_options.keys()).index(current_stg_mode if current_stg_mode in request_mode_options else 'stream'),
+                help="控制后台向 Gemini 发送请求时的流式策略"
+            )
+
+            # 性能影响说明（仅针对前端输出模式）
+            st.markdown("**性能影响（输出模式）**")
             if selected_mode == 'stream':
                 st.success("流式模式可以提供更快的首字响应时间，提升用户体验")
             elif selected_mode == 'non_stream':
@@ -2915,12 +2930,12 @@ elif page == "系统设置":
                 else:
                     st.error("保存失败")
 
-        # ---------------- 向 Gemini 流式模式配置 ----------------
-        st.divider()
-        st.markdown("#### 向 Gemini 流式模式配置")
-        st.markdown("控制向 Gemini 后端发送请求时的流式/非流式行为")
 
-        stream_to_gemini_mode_config = stats_data.get('stream_to_gemini_mode_config', {})
+
+
+
+
+        """  # BEGIN legacy Gemini form removed
         current_stg_mode = stream_to_gemini_mode_config.get('mode', 'auto')
 
         st.markdown(f'''
@@ -2940,7 +2955,7 @@ elif page == "系统设置":
         </div>
         ''', unsafe_allow_html=True)
 
-        with st.form("stream_to_gemini_form"):
+
             col1, col2 = st.columns([1, 1])
 
             with col1:
@@ -2979,6 +2994,8 @@ elif page == "系统设置":
                     st.rerun()
                 else:
                     st.error("保存失败")
+
+        """  # END legacy Gemini form removed
 
     with tab4:
         st.markdown("#### 负载均衡策略")
