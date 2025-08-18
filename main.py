@@ -2887,7 +2887,21 @@ elif page == "系统设置":
                 )
 
             with col2:
-                st.markdown("**模式说明**")
+                st.markdown("**流式请求模式**")
+                request_mode_options = {
+                    'stream': '流式',
+                    'non_stream': '非流式'
+                }
+
+                selected_request_mode = st.selectbox(
+                    "流式请求模式",
+                    options=list(request_mode_options.keys()),
+                    format_func=lambda x: request_mode_options[x],
+                    index=list(request_mode_options.keys()).index(current_stg_mode if current_stg_mode in request_mode_options else 'stream'),
+                    help="控制后台向 Gemini 发送请求时的流式策略"
+                )
+
+                # 模式说明
                 mode_descriptions = {
                     'auto': "根据用户请求参数决定，提供最佳的兼容性",
                     'stream': "所有响应都使用流式输出，适合实时交互场景",
@@ -2896,29 +2910,6 @@ elif page == "系统设置":
 
                 st.info(mode_descriptions[selected_mode])
 
-            # -------- 流式请求模式（向 Gemini） --------
-            st.markdown("**流式请求模式（向 Gemini）**")
-            request_mode_options = {
-                'stream': '流式',
-                'non_stream': '非流式'
-            }
-
-            selected_request_mode = st.selectbox(
-                "流式请求模式",
-                options=list(request_mode_options.keys()),
-                format_func=lambda x: request_mode_options[x],
-                index=list(request_mode_options.keys()).index(current_stg_mode if current_stg_mode in request_mode_options else 'stream'),
-                help="控制后台向 Gemini 发送请求时的流式策略"
-            )
-
-            # 性能影响说明（仅针对前端输出模式）
-            st.markdown("**性能影响（输出模式）**")
-            if selected_mode == 'stream':
-                st.success("流式模式可以提供更快的首字响应时间，提升用户体验")
-            elif selected_mode == 'non_stream':
-                st.warning("非流式模式会增加响应延迟，但能确保完整的响应内容")
-            else:
-                st.info("自动模式提供最佳的兼容性，推荐在大多数情况下使用")
 
             if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 # 保存前端输出模式
