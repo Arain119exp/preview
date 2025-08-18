@@ -2915,6 +2915,71 @@ elif page == "系统设置":
                 else:
                     st.error("保存失败")
 
+        # ---------------- 向 Gemini 流式模式配置 ----------------
+        st.divider()
+        st.markdown("#### 向 Gemini 流式模式配置")
+        st.markdown("控制向 Gemini 后端发送请求时的流式/非流式行为")
+
+        stream_to_gemini_mode_config = stats_data.get('stream_to_gemini_mode_config', {})
+        current_stg_mode = stream_to_gemini_mode_config.get('mode', 'auto')
+
+        st.markdown(f'''
+        <div style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(5, 150, 105, 0.1) 100%); 
+                    border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h5 style="margin: 0; color: #374151; font-size: 1.1rem;">当前向 Gemini 模式</h5>
+                    <p style="margin: 0.5rem 0 0 0; color: #6b7280; font-size: 0.9rem;">
+                        影响后台与 Gemini 的通信方式
+                    </p>
+                </div>
+                <div style="background: #10b981; color: white; padding: 0.5rem 1rem; border-radius: 8px; font-weight: 500;">
+                    {mode_options.get(current_stg_mode, '未知')}
+                </div>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+        with st.form("stream_to_gemini_form"):
+            col1, col2 = st.columns([1, 1])
+
+            with col1:
+                st.markdown("**模式选择**")
+                selected_stg_mode = st.selectbox(
+                    "向 Gemini 流式模式",
+                    options=list(mode_options.keys()),
+                    format_func=lambda x: mode_options[x],
+                    index=list(mode_options.keys()).index(current_stg_mode),
+                    help="选择与 Gemini 通信时的流式策略"
+                )
+
+            with col2:
+                st.markdown("**模式说明**")
+                st.info(mode_descriptions[selected_stg_mode])
+
+            # 性能影响说明
+            st.markdown("**性能影响**")
+            if selected_stg_mode == 'stream':
+                st.success("开启流式可降低与 Gemini 通信延迟")
+            elif selected_stg_mode == 'non_stream':
+                st.warning("禁用流式可能增加延迟，但可确保完整响应")
+            else:
+                st.info("自动模式将根据上下文自动决定")
+
+            if st.form_submit_button("保存向 Gemini 配置", type="primary", use_container_width=True):
+                update_data = {
+                    "mode": selected_stg_mode
+                }
+
+                result = call_api('/admin/config/stream-to-gemini-mode', 'POST', data=update_data)
+                if result and result.get('success'):
+                    st.success("配置已保存")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("保存失败")
+
     with tab4:
         st.markdown("#### 负载均衡策略")
         st.markdown("选择API密钥的负载均衡算法")

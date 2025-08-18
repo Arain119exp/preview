@@ -455,6 +455,32 @@ class Database:
             logger.error(f"Failed to set stream mode config: {e}")
             return False
 
+    # 与 Gemini 服务通信时的流式模式配置
+    def get_stream_to_gemini_mode_config(self) -> Dict[str, any]:
+        """获取与 Gemini 通信的流式模式配置"""
+        try:
+            return {
+                'mode': self.get_config('stream_to_gemini_mode', 'auto')
+            }
+        except Exception as e:
+            logger.error(f"Failed to get stream_to_gemini_mode config: {e}")
+            return {
+                'mode': 'auto'
+            }
+
+    def set_stream_to_gemini_mode_config(self, mode: str = None) -> bool:
+        """设置与 Gemini 通信的流式模式配置"""
+        try:
+            if mode is not None:
+                if mode not in ['auto', 'stream', 'non_stream']:
+                    raise ValueError("mode must be one of: auto, stream, non_stream")
+                self.set_config('stream_to_gemini_mode', mode)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set stream_to_gemini_mode config: {e}")
+            return False
+
     # 故障转移配置方法
     def get_failover_config(self) -> Dict[str, any]:
         """获取故障转移配置"""

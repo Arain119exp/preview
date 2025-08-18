@@ -606,7 +606,8 @@ async def collect_gemini_response_directly(
         key_id: int,
         gemini_request: Dict,
         openai_request: ChatCompletionRequest,
-        model_name: str
+        model_name: str,
+        use_stream: bool = True
 ) -> Dict:
     """
     从Google API收集完整响应
@@ -634,14 +635,18 @@ async def collect_gemini_response_directly(
 
     try:
         client = get_cached_client(gemini_key)
-        # 使用 google-genai 的流式接口
-        async with asyncio.timeout(timeout):
+        if use_stream:
+            # 使用 google-genai 的流式接口，并在每个 chunk 间重置超时计时
             genai_stream = await client.aio.models.generate_content_stream(
                 model=model_name,
                 contents=gemini_request["contents"],
                 config=gemini_request.get("generation_config")
             )
-            async for chunk in genai_stream:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(genai_stream.__anext__(), timeout)
+                except StopAsyncIteration:
+                    break
                 # chunk.candidates 列表结构与 REST 回包保持一致
                 # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
                 data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
@@ -690,7 +695,35 @@ async def collect_gemini_response_directly(
         )
         raise
 
-    # 检查是否收集到内容
+    else:
+            # 非流式直接调用
+            try:
+                response_obj = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=gemini_request["contents"],
+                    config=gemini_request.get("generation_config")
+                )
+                data = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
+                for candidate in data.get("candidates", []):
+                    finish_reason_raw = candidate.get("finishReason", "stop")
+                    finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
+                    for part in candidate.get("content", {}).get("parts", []):
+                        text = part.get("text", "")
+                        if text:
+                            complete_content += text
+                            total_tokens += len(text.split())
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, True, response_time)
+                )
+            except Exception as e:
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, False, response_time)
+                )
+                raise
+
+        # 检查是否收集到内容
     if not complete_content.strip():
         logger.error(f"No content collected directly. Processed {processed_lines} lines")
         raise HTTPException(
@@ -818,6 +851,18 @@ async def make_request_with_fast_failover(
             key_info = selection_result['key_info']
             logger.info(f"Fast failover attempt {attempt + 1}: Using key #{key_info['id']}")
 
+            # ====== 计算 should_stream_to_gemini ======
+            stream_to_gemini_mode = db.get_stream_to_gemini_mode_config().get('mode', 'auto')
+            has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
+            if has_tool_calls:
+                should_stream_to_gemini = False
+            elif stream_to_gemini_mode == 'stream':
+                should_stream_to_gemini = True
+            elif stream_to_gemini_mode == 'non_stream':
+                should_stream_to_gemini = False
+            else:
+                should_stream_to_gemini = True
+
             try:
                 # 确定超时时间：工具调用或快速响应模式使用60秒，其他使用配置值
                 has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
@@ -840,7 +885,8 @@ async def make_request_with_fast_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name
+                    model_name,
+                    use_stream=should_stream_to_gemini
                 )
                 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
@@ -1152,7 +1198,8 @@ async def stream_with_fast_failover(
                         key_info['id'],
                         gemini_request,
                         openai_request,
-                        model_name
+                        model_name,
+                    use_stream=should_stream_to_gemini
                 ):
                     yield chunk
                     success = True
@@ -1224,6 +1271,45 @@ async def stream_with_fast_failover(
     yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode('utf-8')
     yield "data: [DONE]\n\n".encode('utf-8')
 
+
+async def stream_non_stream_keep_alive(
+        gemini_request: Dict,
+        openai_request: ChatCompletionRequest,
+        model_name: str,
+        user_key_info: Dict = None
+) -> AsyncGenerator[bytes, None]:
+    """向 Gemini 使用非流式接口，但对客户端保持 SSE 流式格式。先发送 keep-alive 空 chunk，再完整返回内容。"""
+    # 立即发送一次空注释保持连接
+    yield b":\n\n"
+
+    try:
+        # 根据是否启用快速故障转移选择请求路径
+        if await should_use_fast_failover():
+            openai_response = await make_request_with_fast_failover(
+                gemini_request,
+                openai_request,
+                model_name,
+                user_key_info=user_key_info
+            )
+        else:
+            openai_response = await make_request_with_failover(
+                gemini_request,
+                openai_request,
+                model_name,
+                user_key_info=user_key_info
+            )
+
+        # 将完整响应再次封装为单次 data 事件
+        yield f"data: {json.dumps(openai_response, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+    except HTTPException as e:
+        error_data = {"error": {"message": e.detail, "code": e.status_code}}
+        yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+    except Exception as e:
+        error_data = {"error": {"message": str(e), "code": 500}}
+        yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
 
 # 配置管理函数
 async def should_use_fast_failover() -> bool:
@@ -2213,6 +2299,18 @@ async def make_request_with_failover(
 
             logger.info(f"Attempt {attempt + 1}: Using key #{key_info['id']} for {model_name}")
 
+            # ====== 计算 should_stream_to_gemini ======
+            stream_to_gemini_mode = db.get_stream_to_gemini_mode_config().get('mode', 'auto')
+            has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
+            if has_tool_calls:
+                should_stream_to_gemini = False
+            elif stream_to_gemini_mode == 'stream':
+                should_stream_to_gemini = True
+            elif stream_to_gemini_mode == 'non_stream':
+                should_stream_to_gemini = False
+            else:
+                should_stream_to_gemini = True
+
             try:
                 # 直接从Google API收集完整响应（传统故障转移）
                 logger.info(f"Using direct collection for non-streaming request with key #{key_info['id']} (traditional failover)")
@@ -2223,7 +2321,8 @@ async def make_request_with_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name
+                    model_name,
+                    use_stream=should_stream_to_gemini
                 )
 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
@@ -3307,6 +3406,10 @@ async def chat_completions(
         # 获取管理者配置的流式模式
         stream_mode_config = db.get_stream_mode_config()
         stream_mode = stream_mode_config.get('mode', 'auto')
+
+        # 获取与 Gemini 通信的流式模式
+        stream_to_gemini_mode_config = db.get_stream_to_gemini_mode_config()
+        stream_to_gemini_mode = stream_to_gemini_mode_config.get('mode', 'auto')
         
         # 检查是否有工具调用
         has_tool_calls = bool(request.tools or request.tool_choice)
@@ -3327,9 +3430,33 @@ async def chat_completions(
             logger.info("Stream mode forced to non-streaming")
         # stream_mode == 'auto' 时保持原有逻辑，跟随用户请求
 
-        logger.info(f"DEBUG: Final should_stream={should_stream}")
+        # ===== 计算向 Gemini 的流式模式 =====
+        should_stream_to_gemini = True  # 默认向 Gemini 使用流式
+        if has_tool_calls:
+            should_stream_to_gemini = False
+            logger.info("Tool calls detected, forcing non-streaming mode to Gemini")
+        elif stream_to_gemini_mode == 'stream':
+            should_stream_to_gemini = True
+            logger.info("Gemini stream mode forced to streaming")
+        elif stream_to_gemini_mode == 'non_stream':
+            should_stream_to_gemini = False
+            logger.info("Gemini stream mode forced to non-streaming")
+        # auto 时保持默认
+
+        logger.info(f"DEBUG: Final should_stream={should_stream}, should_stream_to_gemini={should_stream_to_gemini}")
 
         if should_stream:
+            # 当客户端要求流式，但向 Gemini 使用非流式时，走 keep-alive 兼容路径
+            if not should_stream_to_gemini:
+                return StreamingResponse(
+                    stream_non_stream_keep_alive(
+                        gemini_request,
+                        request,
+                        actual_model_name,
+                        user_key_info=user_key_info
+                    ),
+                    media_type="text/event-stream; charset=utf-8"
+                )
             if await should_use_fast_failover():
                 return StreamingResponse(
                     stream_with_fast_failover(
@@ -4364,6 +4491,35 @@ async def update_stream_mode_config(request: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+@app.post("/admin/config/stream-to-gemini-mode", summary="更新向 Gemini 流式模式配置", tags=["管理 API：配置"])
+async def update_stream_to_gemini_mode_config(request: dict):
+    """
+    **更新向 Gemini 流式模式配置**
+
+    修改向 Gemini 后端发送请求时的流式行为。
+    - **mode**: 'auto', 'stream', 'non_stream'
+    """
+    try:
+        mode = request.get("mode")
+        success = db.set_stream_to_gemini_mode_config(mode=mode)
+
+        if success:
+            logger.info(f"Updated stream_to_gemini_mode config: mode={mode}")
+            return {
+                "success": True,
+                "message": "Stream-to-Gemini mode configuration updated successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update stream-to-Gemini mode configuration")
+
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update stream_to_gemini_mode config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/admin/config/load-balance", summary="更新负载均衡策略", tags=["管理 API：配置"])
 async def update_load_balance_config(request: dict):
     """
@@ -4425,6 +4581,7 @@ async def get_all_config():
             "cleanup_config": cleanup_config,
             "anti_detection_config": anti_detection_config,
             "stream_mode_config": stream_mode_config,
+            "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
             "failover_config": failover_config
         }
     except Exception as e:
@@ -4457,6 +4614,7 @@ async def get_admin_stats():
         "anti_detection_enabled": db.get_config('anti_detection_enabled', 'true').lower() == 'true',
         "anti_detection_stats": anti_detection.get_statistics(),
         "stream_mode_config": db.get_stream_mode_config(),
+        "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
         "failover_config": db.get_failover_config()
     }
 
