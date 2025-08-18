@@ -267,6 +267,9 @@ class Database:
 
             # 防自动化检测配置
             ('anti_detection_enabled', 'true', '是否启用防自动化检测'),
+
+            # 防截断配置
+            ('anti_truncation_enabled', 'false', '是否启用防截断功能'),
             
             # 流式模式配置
             ('stream_mode', 'auto', '流式模式设置: auto=自动, stream=流式, non_stream=非流式'),
@@ -551,6 +554,29 @@ class Database:
             logger.error(f"Failed to set anti detection config: {e}")
             return False
 
+    # 防截断配置方法
+    def get_anti_truncation_config(self) -> Dict[str, any]:
+        """获取防截断配置"""
+        try:
+            return {
+                'enabled': self.get_config('anti_truncation_enabled', 'false').lower() == 'true'
+            }
+        except Exception as e:
+            logger.error(f"Failed to get anti truncation config: {e}")
+            return {
+                'enabled': False
+            }
+
+    def set_anti_truncation_config(self, enabled: bool = None) -> bool:
+        """设置防截断配置"""
+        try:
+            if enabled is not None:
+                self.set_config('anti_truncation_enabled', 'true' if enabled else 'false')
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set anti truncation config: {e}")
+            return False
     # 模型配置管理
     def get_supported_models(self) -> List[str]:
         """获取支持的模型列表"""

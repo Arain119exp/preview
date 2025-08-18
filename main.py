@@ -2040,7 +2040,7 @@ with st.sidebar:
     <div class="sidebar-footer">
         <div class="sidebar-footer-content">
             <div class="sidebar-footer-item">
-                <span>版本 v1.4</span>
+                <span>版本 v1.4.2</span>
             </div>
             <div class="sidebar-footer-item">
                 <a href="{API_BASE_URL}/docs" target="_blank" class="sidebar-footer-link">API 文档</a>
@@ -2649,8 +2649,8 @@ elif page == "系统设置":
         st.stop()
 
     # 包含故障转移配置的标签页
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "思考模式", "提示词注入", "流式模式", "负载均衡", "故障转移", "自动清理", "防检测", "系统信息"
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+        "思考模式", "提示词注入", "流式模式", "负载均衡", "故障转移", "自动清理", "防检测", "防截断", "系统信息"
     ])
 
     with tab1:
@@ -3553,12 +3553,52 @@ elif page == "系统设置":
             st.error("无法获取防检测配置数据")
 
     with tab8:
+        st.markdown("#### 防截断配置")
+        st.markdown("启用或禁用防截断处理功能")
+
+        trunc_conf = call_api('/admin/config/anti-truncation', 'GET')
+        if trunc_conf is not None:
+            current_enabled = trunc_conf.get('enabled', False)
+            status_text = "已启用" if current_enabled else "已禁用"
+            status_color = "#10b981" if current_enabled else "#ef4444"
+            st.markdown(f'''
+            <div style="background: linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(59, 130, 246, 0.1) 100%); 
+                        border: 1px solid rgba(34, 197, 94, 0.2); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h5 style="margin: 0; color: #374151; font-size: 1.1rem;">防截断状态</h5>
+                        <p style="margin: 0.5rem 0 0 0; color: #6b7280; font-size: 0.9rem;">
+                            当前状态: {status_text}
+                        </p>
+                    </div>
+                    <div style="background: {status_color}; color: white; padding: 0.5rem 1rem; border-radius: 8px; font-weight: 500;">
+                        {status_text}
+                    </div>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+            with st.form("anti_trunc_form"):
+                enable_trunc = st.checkbox("启用防截断功能", value=current_enabled)
+
+                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                    res = call_api('/admin/config/anti-truncation', 'POST', data={'enabled': enable_trunc})
+                    if res and res.get('success'):
+                        st.success("防截断配置已更新")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("更新防截断配置失败")
+        else:
+            st.error("无法获取防截断配置数据")
+
+    with tab9:
         st.markdown("#### 系统信息")
         st.markdown("查看系统运行状态和资源使用情况")
 
         # 系统概览
         python_version = status_data.get('python_version', 'Unknown').split()[0]
-        version = status_data.get('version', '1.4')
+        version = status_data.get('version', '1.4.2')
         uptime_hours = status_data.get('uptime_seconds', 0) // 3600
 
         st.markdown(f'''
@@ -3674,7 +3714,7 @@ st.markdown(
     <div style='text-align: center; color: rgba(255, 255, 255, 0.7); font-size: 0.8125rem; margin-top: 4rem; padding: 2rem 0; border-top: 1px solid rgba(255, 255, 255, 0.15); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); background: rgba(255, 255, 255, 0.05); border-radius: 16px 16px 0 0; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);'>
         <a href='{API_BASE_URL}/health' target='_blank' style='color: rgba(255, 255, 255, 0.8); text-decoration: none; transition: all 0.3s ease; padding: 0.25rem 0.5rem; border-radius: 6px; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);' onmouseover='this.style.color="white"; this.style.background="rgba(255, 255, 255, 0.1)"; this.style.textShadow="0 0 8px rgba(255, 255, 255, 0.5)";' onmouseout='this.style.color="rgba(255, 255, 255, 0.8)"; this.style.background="transparent"; this.style.textShadow="none";'>健康检查</a> · 
         <span style='color: rgba(255, 255, 255, 0.6);'>{API_BASE_URL}</span> ·
-        <span style='color: rgba(255, 255, 255, 0.6);'>v1.4</span>
+        <span style='color: rgba(255, 255, 255, 0.6);'>v1.4.2</span>
     </div>
     """,
     unsafe_allow_html=True

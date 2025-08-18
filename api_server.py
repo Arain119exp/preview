@@ -11,6 +11,7 @@ import random
 import hashlib
 import io  # 用于 google-genai 文件上传
 import itertools  # 轮询计数器
+import copy  # 用于深拷贝请求对象
 _rr_counter = itertools.count()  # 全局递增计数器
 _rr_lock = asyncio.Lock()  # 轮询锁
 from datetime import datetime, timedelta
@@ -631,6 +632,11 @@ async def collect_gemini_response_directly(
     total_tokens = 0
     finish_reason = "stop"
     processed_lines = 0
+
+    # 防截断相关变量
+    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+    full_response = ""
+    saw_finish_tag = False
     start_time = time.time()
 
     try:
@@ -730,6 +736,46 @@ async def collect_gemini_response_directly(
             status_code=502,
             detail="No content received from Google API"
         )
+
+    # Anti-truncation handling for non-stream response
+    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+    if anti_trunc_cfg.get('enabled'):
+        max_attempts = anti_trunc_cfg.get('max_attempts', 3)
+        attempt = 0
+        while True:
+            trimmed = complete_content.rstrip()
+            if trimmed.endswith('[finish]'):
+                complete_content = trimmed[:-8].rstrip()
+                break
+            if attempt >= max_attempts:
+                logger.info("Anti-truncation enabled but reached max attempts without [finish].")
+                break
+            attempt += 1
+            logger.info(f"Anti-truncation attempt {attempt}: continue fetching content")
+            # 构造新的请求，在末尾追加继续提示
+            continuation_request = copy.deepcopy(gemini_request)
+            continuation_request['contents'].append({
+                "role": "user",
+                "parts": [{
+                    "text": "继续，请以 [finish] 结尾"
+                }]
+            })
+            try:
+                cont_response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=continuation_request["contents"],
+                    config=continuation_request.get("generation_config")
+                )
+                data = cont_response.to_dict() if hasattr(cont_response, "to_dict") else json.loads(cont_response.model_dump_json())
+                for candidate in data.get("candidates", []):
+                    for part in candidate.get("content", {}).get("parts", []):
+                        text = part.get("text", "")
+                        if text:
+                            complete_content += text
+                            total_tokens += len(text.split())
+            except Exception as e:
+                logger.warning(f"Anti-truncation continuation attempt failed: {e}")
+                break
 
     # 计算token使用量
     prompt_tokens = len(str(openai_request.messages).split())
@@ -1027,6 +1073,17 @@ async def stream_gemini_response_single_attempt(
                                     continue
                                 total_tokens += len(text.split())
                                 has_content = True
+                                # Anti-truncation handling (stream)
+                                if anti_trunc_cfg.get('enabled'):
+                                    idx = text.find('[finish]')
+                                    if idx != -1:
+                                        text_to_send = text[:idx]
+                                        saw_finish_tag = True
+                                    else:
+                                        text_to_send = text
+                                else:
+                                    text_to_send = text
+                                full_response += text_to_send
 
                                 is_thought = getattr(part, "thought", False)
                                 if is_thought and not (openai_request.thinking_config and openai_request.thinking_config.include_thoughts):
@@ -1068,7 +1125,7 @@ async def stream_gemini_response_single_attempt(
                                     "model": openai_request.model,
                                     "choices": [{
                                         "index": 0,
-                                        "delta": {"content": text},
+                                        "delta": {"content": text_to_send},
                                         "finish_reason": None
                                     }]
                                 }
@@ -1611,7 +1668,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Gemini API Proxy",
     description="",
-    version="1.4",
+    version="1.4.2",
     lifespan=lifespan
 )
 
@@ -1750,6 +1807,18 @@ def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
                 original_content = new_messages[i].get_text_content()
                 new_content = f"{original_content}\n\n{content}"
                 new_messages[i] = ChatMessage(role='user', content=new_content)
+                break
+
+    # Anti-truncation prompt injection
+    anti_truncation_cfg = db.get_anti_truncation_config()
+    if anti_truncation_cfg.get('enabled'):
+        for i in range(len(new_messages) - 1, -1, -1):
+            if new_messages[i].role == 'user':
+                suffix = "请以 [finish] 结尾"
+                if isinstance(new_messages[i].content, str):
+                    new_messages[i] = ChatMessage(role='user', content=f"{new_messages[i].content}\n\n{suffix}")
+                elif isinstance(new_messages[i].content, list):
+                    new_messages[i].content.append(suffix)
                 break
 
     return new_messages
@@ -2553,6 +2622,12 @@ async def stream_gemini_response(
                 total_tokens = 0
                 thinking_sent = False
                 processed_chunks = 0
+                
+                # 防截断相关变量
+                anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+                full_response = ""
+                continuation_attempted = False
+                saw_finish_tag = False
 
                 async for chunk in genai_stream:
                     processed_chunks += 1
@@ -2660,6 +2735,17 @@ async def stream_gemini_response(
 
                                                 total_tokens += len(text.split())
                                                 has_content = True
+                                                # Anti-truncation handling
+                                                if anti_trunc_cfg.get('enabled'):
+                                                    idx = text.find('[finish]')
+                                                    if idx != -1:
+                                                        text_to_send = text[:idx]
+                                                        saw_finish_tag = True
+                                                    else:
+                                                        text_to_send = text
+                                                else:
+                                                    text_to_send = text
+                                                full_response += text_to_send
 
                                                 is_thought = part.get("thought", False)
 
@@ -2881,7 +2967,7 @@ async def root():
     return {
         "service": "Gemini API Proxy",
         "status": "running",
-        "version": "1.4",
+        "version": "1.4.2",
         "features": ["Gemini 2.5 Multimodal"],
         "keep_alive": keep_alive_enabled,
         "auto_cleanup": db.get_auto_cleanup_config()['enabled'],
@@ -2915,7 +3001,7 @@ async def health_check():
         "environment": "render" if os.getenv('RENDER_EXTERNAL_URL') else "local",
         "uptime_seconds": int(uptime),
         "request_count": request_count,
-        "version": "1.4",
+        "version": "1.4.2",
         "multimodal_support": "Gemini 2.5 Optimized",
         "keep_alive_enabled": keep_alive_enabled,
         "auto_cleanup_enabled": db.get_auto_cleanup_config()['enabled'],
@@ -2959,7 +3045,7 @@ async def get_status():
     return {
         "service": "Gemini API Proxy",
         "status": "running",
-        "version": "1.4",
+        "version": "1.4.2",
         "render_url": os.getenv('RENDER_EXTERNAL_URL'),
         "python_version": sys.version,
         "models": db.get_supported_models(),
@@ -3031,7 +3117,7 @@ async def api_v1_info():
 
     return {
         "service": "Gemini API Proxy",
-        "version": "1.4",
+        "version": "1.4.2",
         "api_version": "v1",
         "compatibility": "OpenAI API v1",
         "description": "A high-performance proxy for Gemini API with OpenAI compatibility.",
@@ -3922,6 +4008,45 @@ async def test_anti_detection():
         logger.error(f"Anti-detection test failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# 防截断管理端点
+@app.post("/admin/config/anti-truncation", summary="更新防截断配置", tags=["管理 API：配置"])
+async def update_anti_truncation_config(request: dict):
+    """
+    **更新防截断配置**
+
+    修改防截断功能的状态。
+    - **enabled**: `true` 或 `false`
+    """
+    try:
+        enabled = request.get('enabled')
+        if enabled is None:
+            raise HTTPException(status_code=422, detail="Parameter 'enabled' is required")
+        if db.set_config('anti_truncation_enabled', 'true' if enabled else 'false'):
+            logger.info(f"Anti-truncation enabled: {enabled}")
+            return {"success": True, "message": "Anti-truncation configuration updated successfully", "anti_truncation_enabled": enabled}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update anti-truncation configuration")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update anti-truncation config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/config/anti-truncation", summary="获取防截断配置", tags=["管理 API：配置"])
+async def get_anti_truncation_config():
+    """
+    **获取防截断配置**
+
+    返回防截断功能的当前状态。
+    """
+    try:
+        enabled = db.get_config('anti_truncation_enabled', 'false').lower() == 'true'
+        return {"success": True, "anti_truncation_enabled": enabled}
+    except Exception as e:
+        logger.error(f"Failed to get anti-truncation config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 保活管理端点
 @app.post("/admin/keep-alive/toggle", summary="切换保活状态", tags=["管理 API：配置"])
