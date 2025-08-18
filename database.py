@@ -233,7 +233,7 @@ class Database:
     def _init_system_config(self, cursor):
         """初始化系统配置"""
         default_configs = [
-            ('default_model_name', 'gemini-2.5-flash', '默认模型名称'),
+            ('default_model_name', 'gemini-2.5-flash-lite', '默认模型名称'),
             ('max_retries', '3', 'API请求最大重试次数（已废弃，保留兼容性）'),
             ('request_timeout', '60', 'API请求超时时间（秒）'),
             ('load_balance_strategy', 'adaptive', '负载均衡策略: least_used, round_robin, adaptive'),
@@ -285,14 +285,19 @@ class Database:
         """初始化模型配置（单个API限制）"""
         default_models = [
             ('gemini-2.5-flash', 10, 250000, 250),  # 单API: RPM, TPM, RPD
+            ('gemini-2.5-flash-lite', 15, 250000, 1000),  # 单API: RPM, TPM, RPD
             ('gemini-2.5-pro', 5, 250000, 100),  # 单API: RPM, TPM, RPD
         ]
 
         for model_name, rpm, tpm, rpd in default_models:
             try:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO model_configs (model_name, single_api_rpm_limit, single_api_tpm_limit, single_api_rpd_limit)
+                    INSERT INTO model_configs (model_name, single_api_rpm_limit, single_api_tpm_limit, single_api_rpd_limit)
                     VALUES (?, ?, ?, ?)
+                    ON CONFLICT(model_name) DO UPDATE SET
+                        single_api_rpm_limit=excluded.single_api_rpm_limit,
+                        single_api_tpm_limit=excluded.single_api_tpm_limit,
+                        single_api_rpd_limit=excluded.single_api_rpd_limit
                 ''', (model_name, rpm, tpm, rpd))
             except Exception as e:
                 logger.error(f"Failed to insert model config {model_name}: {e}")
@@ -549,7 +554,7 @@ class Database:
     # 模型配置管理
     def get_supported_models(self) -> List[str]:
         """获取支持的模型列表"""
-        return ['gemini-2.5-flash', 'gemini-2.5-pro']
+        return ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro']
 
     def get_model_config(self, model_name: str) -> Optional[Dict]:
         """获取模型配置（包含计算的总限制）"""

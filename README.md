@@ -180,7 +180,7 @@ client = openai.OpenAI(
 
 # 文本 + 图片对话
 response = client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="gemini-2.5-flash-lite",
     messages=[
         {
             "role": "user",

@@ -417,7 +417,7 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
         # SDK 默认 httpx 超时较高，这里通过 asyncio.wait_for 施加整体超时
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-lite",
                 contents="Hello",
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
@@ -1707,7 +1707,7 @@ def get_actual_model_name(request_model: str) -> str:
         logger.info(f"Using requested model: {request_model}")
         return request_model
 
-    default_model = db.get_config('default_model_name', 'gemini-2.5-flash')
+    default_model = db.get_config('default_model_name', 'gemini-2.5-flash-lite')
     logger.info(f"Unsupported model: {request_model}, using default: {default_model}")
     return default_model
 

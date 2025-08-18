@@ -2130,8 +2130,8 @@ if page == "控制台":
 
             model_config_data = get_cached_model_config(model)
             if not model_config_data:
-                rpm_limit = 10 if 'flash' in model else 5
-                rpd_limit = 250 if 'flash' in model else 100
+                rpm_limit = 15 if 'flash-lite' in model else (10 if 'flash' in model else 5)
+                rpd_limit = 1000 if 'flash-lite' in model else (250 if 'flash' in model else 100)
             else:
                 rpm_limit = model_config_data.get('total_rpm_limit', 10)
                 rpd_limit = model_config_data.get('total_rpd_limit', 250)
@@ -2480,7 +2480,7 @@ client = openai.OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="gemini-2.5-flash-lite",
     messages=[{{"role": "user", "content": "Hello"}}]
 )
                         """, language="python")
@@ -2588,7 +2588,7 @@ elif page == "模型配置":
                 rpm = st.number_input(
                     "RPM (每分钟请求)",
                     min_value=1,
-                    value=current_config.get('single_api_rpm_limit', 10 if 'flash' in model else 5),
+                    value=current_config.get('single_api_rpm_limit', 15 if 'flash-lite' in model else (10 if 'flash' in model else 5)),
                     key=f"rpm_{model}"
                 )
 
@@ -2596,7 +2596,7 @@ elif page == "模型配置":
                 rpd = st.number_input(
                     "RPD (每日请求)",
                     min_value=1,
-                    value=current_config.get('single_api_rpd_limit', 250 if 'flash' in model else 100),
+                    value=current_config.get('single_api_rpd_limit', 1000 if 'flash-lite' in model else (250 if 'flash' in model else 100)),
                     key=f"rpd_{model}"
                 )
 
