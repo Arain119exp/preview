@@ -1246,6 +1246,18 @@ async def stream_with_fast_failover(
             key_info = selection_result['key_info']
             logger.info(f"Stream fast failover attempt {attempt + 1}: Using key #{key_info['id']}")
 
+            # ====== 计算 should_stream_to_gemini ======
+            stream_to_gemini_mode = db.get_stream_to_gemini_mode_config().get('mode', 'auto')
+            has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
+            if has_tool_calls:
+                should_stream_to_gemini = False
+            elif stream_to_gemini_mode == 'stream':
+                should_stream_to_gemini = True
+            elif stream_to_gemini_mode == 'non_stream':
+                should_stream_to_gemini = False
+            else:
+                should_stream_to_gemini = True
+
             success = False
             total_tokens = 0
 
