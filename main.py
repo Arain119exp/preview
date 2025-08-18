@@ -2888,6 +2888,8 @@ elif page == "系统设置":
             with col2:
 
                 # 嵌入流式请求模式选择
+                st.markdown("**流式请求模式**")
+
                 gemini_mode_options = {
                     'stream': '流式',
                     'non_stream': '非流式'
