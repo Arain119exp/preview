@@ -2304,10 +2304,11 @@ elif page == "密钥管理":
                                     for invalid in result.get('invalid_keys', []):
                                         st.error(f"- {invalid}")
 
-    
-    
-    
-    
+                        # 更新成功后刷新列表
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
                         # 显示失败消息和详细信息
                         st.error(result.get('message', '添加失败'))
 
@@ -3558,7 +3559,7 @@ elif page == "系统设置":
 
         trunc_conf = call_api('/admin/config/anti-truncation', 'GET')
         if trunc_conf is not None:
-            current_enabled = trunc_conf.get('enabled', False)
+            current_enabled = trunc_conf.get('anti_truncation_enabled', False)
             status_text = "已启用" if current_enabled else "已禁用"
             status_color = "#10b981" if current_enabled else "#ef4444"
             st.markdown(f'''
