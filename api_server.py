@@ -931,8 +931,7 @@ async def make_request_with_fast_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name,
-                    use_stream=should_stream_to_gemini
+                    model_name
                 )
                 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
@@ -1267,8 +1266,7 @@ async def stream_with_fast_failover(
                         key_info['id'],
                         gemini_request,
                         openai_request,
-                        model_name,
-                    use_stream=should_stream_to_gemini
+                        model_name
                 ):
                     yield chunk
                     success = True
@@ -2402,8 +2400,7 @@ async def make_request_with_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name,
-                    use_stream=should_stream_to_gemini
+                    model_name
                 )
 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
