@@ -2839,6 +2839,10 @@ elif page == "系统设置":
         stream_mode_config = stats_data.get('stream_mode_config', {})
         current_mode = stream_mode_config.get('mode', 'auto')
 
+        # 获取向 Gemini 流式请求模式配置
+        stream_to_gemini_mode_config = stats_data.get('stream_to_gemini_mode_config', {})
+        current_stg_mode = stream_to_gemini_mode_config.get('mode', 'stream')
+
         # 状态概览
         mode_names = {
             'auto': '自动模式',
@@ -2917,12 +2921,25 @@ elif page == "系统设置":
                 st.info("自动模式提供最佳的兼容性，推荐在大多数情况下使用")
 
             if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                # 保存前端输出模式
                 update_data = {
                     "mode": selected_mode
                 }
-
+                ok1 = False
                 result = call_api('/admin/config/stream-mode', 'POST', data=update_data)
                 if result and result.get('success'):
+                    ok1 = True
+
+                # 保存向 Gemini 请求模式
+                update_data_req = {
+                    "mode": selected_request_mode
+                }
+                ok2 = False
+                result2 = call_api('/admin/config/stream-to-gemini-mode', 'POST', data=update_data_req)
+                if result2 and result2.get('success'):
+                    ok2 = True
+
+                if ok1 and ok2:
                     st.success("配置已保存")
                     st.cache_data.clear()
                     time.sleep(1)
