@@ -1057,6 +1057,10 @@ async def stream_gemini_response_single_attempt(
             thinking_sent = False
             has_content = False
             processed_lines = 0
+            # Anti-truncation related variables
+            anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+            full_response = ""
+            saw_finish_tag = False
 
             logger.info("Stream response started")
 
