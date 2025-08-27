@@ -163,6 +163,43 @@ async def safe_genai_request(
         await connection_manager.unregister_connection(connection_id)
         raise
 
+
+# 专门的流式请求包装器
+async def safe_stream_request(
+    client: genai.Client,
+    request_func: callable,
+    connection_manager: ConnectionLifecycleManager,
+    connection_id: str,
+    **kwargs
+) -> AsyncGenerator[bytes, None]:
+    """
+    专门用于流式请求的包装器，确保正确处理异步生成器
+    """
+    try:
+        # 注册连接
+        await connection_manager.register_connection(connection_id)
+
+        # 执行流式请求函数
+        stream_generator = request_func(client, **kwargs)
+
+        # 检查是否为异步生成器
+        if hasattr(stream_generator, '__aiter__') and hasattr(stream_generator, '__anext__'):
+            # 异步生成器：直接返回，不使用await
+            async for chunk in stream_generator:
+                yield chunk
+        else:
+            # 如果意外返回普通协程，抛出异常
+            raise Exception("Stream request function must return an async generator")
+
+    except Exception as e:
+        logger.error(f"Stream request error for connection {connection_id}: {str(e)}")
+        connection_manager.connection_stats['errors'] += 1
+        await connection_manager.unregister_connection(connection_id)
+        raise
+    finally:
+        # 流式请求完成后注销连接
+        await connection_manager.unregister_connection(connection_id)
+
 # 全局管理器实例
 timeout_manager = TimeoutManager()
 connection_manager = ConnectionLifecycleManager()
@@ -1190,13 +1227,16 @@ async def stream_gemini_response_single_attempt(
         client = get_cached_client(gemini_key)
 
         # 流式请求函数
-        async def stream_request(client):
-            contents = gemini_request["contents"]
+        async def stream_request(client, contents=None, config=None):
+            # 使用传递的参数，如果没有则使用默认值
+            stream_contents = contents if contents is not None else gemini_request["contents"]
+            stream_config = config if config is not None else gemini_request.get("generation_config")
+
             # 流式接口直接使用contents和body参数
             genai_stream = await client.aio.models.generate_content_stream(
                 model=model_name,
-                contents=gemini_request["contents"],
-                config=gemini_request.get("generation_config")
+                contents=stream_contents,
+                config=stream_config
             )
 
             # 初始化流式响应变量
@@ -1338,16 +1378,16 @@ async def stream_gemini_response_single_attempt(
 
             await rate_limiter.add_usage(model_name, 1, total_tokens)
 
-        # 执行流式请求
-        await safe_genai_request(
+        # 执行流式请求 - 使用专门的流式请求包装器
+        async for chunk in safe_stream_request(
             client=client,
             request_func=stream_request,
-            timeout_manager=timeout_manager,
             connection_manager=connection_manager,
             connection_id=connection_id,
-            has_tools=has_tool_calls,
-            is_stream=True
-        )
+            contents=gemini_request["contents"],
+            config=gemini_request.get("generation_config")
+        ):
+            yield chunk
 
 
     except Exception as e:
