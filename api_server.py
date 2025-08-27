@@ -31,6 +31,130 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from database import Database
 from experimental import AntiTruncation, TextCrypto
 
+# 统一超时管理器
+class TimeoutManager:
+    """
+    统一超时管理器，用于管理不同场景下的超时配置
+    """
+    def __init__(self):
+        self.default_timeout = 60.0
+        self.tool_timeout = 60.0
+        self.stream_timeout = 60.0
+
+    def get_timeout(self, has_tools: bool = False, is_stream: bool = False) -> float:
+        """
+        根据请求类型获取适当的超时时间
+        """
+        if has_tools:
+            return self.tool_timeout
+        elif is_stream:
+            return self.stream_timeout
+        return self.default_timeout
+
+    def set_timeout(self, timeout_type: str, value: float):
+        """
+        设置特定类型的超时时间
+        """
+        if timeout_type == 'default':
+            self.default_timeout = value
+        elif timeout_type == 'tool':
+            self.tool_timeout = value
+        elif timeout_type == 'stream':
+            self.stream_timeout = value
+
+# 连接生命周期管理器
+class ConnectionLifecycleManager:
+    """
+    连接生命周期管理器，跟踪和管理连接的创建、清理和监控
+    """
+    def __init__(self):
+        self.active_connections = set()
+        self.connection_stats = {
+            'created': 0,
+            'closed': 0,
+            'leaked': 0,
+            'errors': 0
+        }
+        self._lock = asyncio.Lock()
+
+    async def register_connection(self, connection_id: str):
+        """注册新连接"""
+        async with self._lock:
+            self.active_connections.add(connection_id)
+            self.connection_stats['created'] += 1
+            logger.debug(f"Registered connection: {connection_id}")
+
+    async def unregister_connection(self, connection_id: str):
+        """注销连接"""
+        async with self._lock:
+            if connection_id in self.active_connections:
+                self.active_connections.remove(connection_id)
+                self.connection_stats['closed'] += 1
+                logger.debug(f"Unregistered connection: {connection_id}")
+
+    async def cleanup_leaked_connections(self):
+        """清理可能泄漏的连接"""
+        async with self._lock:
+            # 标记所有当前连接为潜在泄漏
+            leaked_count = len(self.active_connections)
+            if leaked_count > 0:
+                logger.warning(f"Detected {leaked_count} potentially leaked connections")
+                self.connection_stats['leaked'] += leaked_count
+                self.active_connections.clear()
+
+    def get_stats(self) -> Dict[str, int]:
+        """获取连接统计信息"""
+        return self.connection_stats.copy()
+
+    def get_active_count(self) -> int:
+        """获取当前活跃连接数"""
+        return len(self.active_connections)
+
+# 安全的GenAI请求包装器
+async def safe_genai_request(
+    client: genai.Client,
+    request_func: callable,
+    timeout_manager: TimeoutManager,
+    connection_manager: ConnectionLifecycleManager,
+    connection_id: str,
+    has_tools: bool = False,
+    is_stream: bool = False,
+    **kwargs
+) -> Any:
+    """
+    安全的GenAI请求包装器，确保连接正确管理
+    """
+    try:
+        # 注册连接
+        await connection_manager.register_connection(connection_id)
+
+        # 获取适当的超时时间
+        timeout = timeout_manager.get_timeout(has_tools, is_stream)
+
+        # 执行请求
+        async with asyncio.timeout(timeout):
+            result = await request_func(client, **kwargs)
+
+        # 成功完成，注销连接
+        await connection_manager.unregister_connection(connection_id)
+
+        return result
+
+    except asyncio.TimeoutError:
+        logger.warning(f"Request timeout for connection {connection_id}")
+        await connection_manager.unregister_connection(connection_id)
+        raise HTTPException(status_code=504, detail="Request timeout")
+
+    except Exception as e:
+        logger.error(f"Request error for connection {connection_id}: {str(e)}")
+        connection_manager.connection_stats['errors'] += 1
+        await connection_manager.unregister_connection(connection_id)
+        raise
+
+# 全局管理器实例
+timeout_manager = TimeoutManager()
+connection_manager = ConnectionLifecycleManager()
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -413,21 +537,34 @@ class RateLimitCache:
 async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, Any]:
     """使用 google-genai SDK 检测单个 Gemini Key 的健康状态"""
     start_time = time.time()
+    connection_id = f"health_check_{uuid.uuid4().hex[:8]}"
+
     try:
         # 复用缓存客户端，避免频繁创建导致 AFC 日志刷屏
         client = get_cached_client(api_key)
-        # SDK 默认 httpx 超时较高，这里通过 asyncio.wait_for 施加整体超时
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
+
+        # 使用安全的请求包装器
+        async def health_check_request(client):
+            return await client.aio.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents="Hello",
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                 )
-            ),
-            timeout=timeout
+            )
+
+        # 执行健康检查请求
+        response = await safe_genai_request(
+            client=client,
+            request_func=health_check_request,
+            timeout_manager=timeout_manager,
+            connection_manager=connection_manager,
+            connection_id=connection_id,
+            has_tools=False,
+            is_stream=False
         )
+
         response_time = time.time() - start_time
         # 成功调用即视为健康
         return {
@@ -437,6 +574,8 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
             "error": None
         }
     except asyncio.TimeoutError:
+        response_time = time.time() - start_time
+        # 连接已在safe_genai_request中清理，这里只需要返回结果
         return {
             "healthy": False,
             "response_time": timeout,
@@ -444,9 +583,11 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
             "error": "Timeout"
         }
     except Exception as e:
+        response_time = time.time() - start_time
+        # 连接已在safe_genai_request中清理
         return {
             "healthy": False,
-            "response_time": time.time() - start_time,
+            "response_time": response_time,
             "status_code": None,
             "error": str(e)
         }
@@ -550,7 +691,7 @@ async def update_key_performance_background(key_id: int, success: bool, response
 
         # 如果失败，启动后台健康检测任务
         if not success:
-            asyncio.create_task(schedule_health_check(key_id))
+            await schedule_health_check(key_id)
 
     except Exception as e:
         logger.error(f"Background performance update failed for key {key_id}: {e}")
@@ -612,169 +753,204 @@ async def collect_gemini_response_directly(
         use_stream: bool = True
 ) -> Dict:
     """
-    从Google API收集完整响应
+    从Google API收集完整响应（重构版，使用安全请求包装器）
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
-    
-    # 确定超时时间
-    has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
-    is_fast_failover = await should_use_fast_failover()
-    if has_tool_calls:
-        timeout = 60.0
-    elif is_fast_failover:
-        timeout = 60.0
-    else:
-        timeout = float(db.get_config('request_timeout', '60'))
-
-    logger.info(f"Starting direct collection from: {url}")
-    
-    complete_content = ""
-    thinking_content = ""
-    total_tokens = 0
-    finish_reason = "stop"
-    processed_lines = 0
-
-    # 防截断相关变量
-    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-    full_response = ""
-    saw_finish_tag = False
-    start_time = time.time()
+    connection_id = f"collect_direct_{uuid.uuid4().hex[:8]}"
 
     try:
+        # 获取客户端
         client = get_cached_client(gemini_key)
-        if use_stream:
-            # 使用 google-genai 的流式接口，并在每个 chunk 间重置超时计时
-            genai_stream = await client.aio.models.generate_content_stream(
-                model=model_name,
-                contents=gemini_request["contents"],
-                config=gemini_request.get("generation_config")
-            )
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(genai_stream.__anext__(), timeout)
-                except StopAsyncIteration:
-                    break
-                # chunk.candidates 列表结构与 REST 回包保持一致
-                # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
-                data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
-                for candidate in data.get("candidates", []):
-                    content_data = candidate.get("content", {})
-                    parts = content_data.get("parts", [])
-                    for part in parts:
-                        text = part.get("text", "")
-                        if not text:
-                            continue
-                        total_tokens += len(text.split())
-                        is_thought = part.get("thought", False)
-                        include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-                        if is_thought and not include_thoughts:
-                            # 仅记录思考，不直接输出
-                            thinking_content += text
-                        else:
-                            if is_thought and not thinking_content and not complete_content:
-                                complete_content += "**Thinking Process:**\n"
-                            elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                complete_content += "\n\n**Response:**\n"
-                            complete_content += text
-                    finish_reason_raw = candidate.get("finishReason", "stop")
-                    finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
 
-                    processed_lines += 1
+        # 确定是否需要流式请求
+        has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
+        is_fast_failover = await should_use_fast_failover()
 
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(key_id, True, response_time)
+        complete_content = ""
+        thinking_content = ""
+        total_tokens = 0
+        finish_reason = "stop"
+        processed_lines = 0
+
+        # 防截断相关变量
+        anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+        full_response = ""
+        saw_finish_tag = False
+        start_time = time.time()
+
+        if use_stream and not has_tool_calls:
+            # 使用流式接口
+            async def stream_request(client):
+                genai_stream = await client.aio.models.generate_content_stream(
+                    model=model_name,
+                    contents=gemini_request["contents"],
+                    config=gemini_request.get("generation_config")
                 )
 
-    except asyncio.TimeoutError as e:
-        logger.warning(f"Direct request timeout/connection error: {str(e)}")
-        response_time = time.time() - start_time
-        asyncio.create_task(
-            update_key_performance_background(key_id, False, response_time)
-        )
-        raise Exception(f"Direct request failed: {str(e)}")
+                async for chunk in genai_stream:
+                    # chunk.candidates 列表结构与 REST 回包保持一致
+                    # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
+                    data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
+                    for candidate in data.get("candidates", []):
+                        content_data = candidate.get("content", {})
+                        parts = content_data.get("parts", [])
+                        for part in parts:
+                            text = part.get("text", "")
+                            if not text:
+                                continue
+                            nonlocal total_tokens, thinking_content, complete_content
+                            total_tokens += len(text.split())
+                            is_thought = part.get("thought", False)
+                            include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
+                            if is_thought and not include_thoughts:
+                                # 仅记录思考，不直接输出
+                                thinking_content += text
+                            else:
+                                if is_thought and not thinking_content and not complete_content:
+                                    complete_content += "**Thinking Process:**\n"
+                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
+                                    complete_content += "\n\n**Response:**\n"
+                                complete_content += text
+                        finish_reason_raw = candidate.get("finishReason", "stop")
+                        nonlocal finish_reason
+                        finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
 
-    except Exception as e:
-        logger.error(f"Unexpected direct request error: {str(e)}")
-        response_time = time.time() - start_time
-        asyncio.create_task(
-            update_key_performance_background(key_id, False, response_time)
-        )
-        raise
+                        nonlocal processed_lines
+                        processed_lines += 1
 
-    else:
-            # 非流式直接调用
-            try:
+                    response_time = time.time() - start_time
+                    asyncio.create_task(
+                        update_key_performance_background(key_id, True, response_time)
+                    )
+
+                return {
+                    "complete_content": complete_content,
+                    "thinking_content": thinking_content,
+                    "total_tokens": total_tokens,
+                    "finish_reason": finish_reason,
+                    "processed_lines": processed_lines
+                }
+
+            # 执行流式请求
+            stream_result = await safe_genai_request(
+                client=client,
+                request_func=stream_request,
+                timeout_manager=timeout_manager,
+                connection_manager=connection_manager,
+                connection_id=connection_id,
+                has_tools=has_tool_calls,
+                is_stream=True
+            )
+
+            complete_content = stream_result["complete_content"]
+            thinking_content = stream_result["thinking_content"]
+            total_tokens = stream_result["total_tokens"]
+            finish_reason = stream_result["finish_reason"]
+
+        else:
+            # 使用非流式接口
+            async def non_stream_request(client):
                 response_obj = await client.aio.models.generate_content(
                     model=model_name,
                     contents=gemini_request["contents"],
                     config=gemini_request.get("generation_config")
                 )
                 data = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
+
+                complete_content = ""
+                thinking_content = ""
+                total_tokens = 0
+                finish_reason = "stop"
+
                 for candidate in data.get("candidates", []):
                     finish_reason_raw = candidate.get("finishReason", "stop")
                     finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
                     for part in candidate.get("content", {}).get("parts", []):
                         text = part.get("text", "")
                         if text:
-                            complete_content += text
+                            is_thought = part.get("thought", False)
+                            include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
+                            if is_thought and not include_thoughts:
+                                thinking_content += text
+                            else:
+                                if is_thought and not thinking_content and not complete_content:
+                                    complete_content += "**Thinking Process:**\n"
+                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
+                                    complete_content += "\n\n**Response:**\n"
+                                complete_content += text
                             total_tokens += len(text.split())
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(key_id, True, response_time)
-                )
-            except Exception as e:
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(key_id, False, response_time)
-                )
-                raise
+
+                return {
+                    "complete_content": complete_content,
+                    "thinking_content": thinking_content,
+                    "total_tokens": total_tokens,
+                    "finish_reason": finish_reason
+                }
+
+            # 执行非流式请求
+            non_stream_result = await safe_genai_request(
+                client=client,
+                request_func=non_stream_request,
+                timeout_manager=timeout_manager,
+                connection_manager=connection_manager,
+                connection_id=connection_id,
+                has_tools=has_tool_calls,
+                is_stream=False
+            )
+
+            complete_content = non_stream_result["complete_content"]
+            thinking_content = non_stream_result["thinking_content"]
+            total_tokens = non_stream_result["total_tokens"]
+            finish_reason = non_stream_result["finish_reason"]
 
         # 检查是否收集到内容
-    if not complete_content.strip():
-        logger.error(f"No content collected directly. Processed {processed_lines} lines")
-        raise HTTPException(
-            status_code=502,
-            detail="No content received from Google API"
-        )
+        if not complete_content.strip():
+            logger.error(f"No content collected directly. Connection: {connection_id}")
+            raise HTTPException(
+                status_code=502,
+                detail="No content received from Google API"
+            )
 
-    # Anti-truncation handling for non-stream response
-    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-    if anti_trunc_cfg.get('enabled'):
-        complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
+        # Anti-truncation handling
+        anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+        if anti_trunc_cfg.get('enabled'):
+            complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
 
-    # Anti-censorship handling for non-stream response
-    anti_censorship_cfg = get_anti_censorship_config()
-    if anti_censorship_cfg:
-        complete_content = TextCrypto.auto_decrypt_response(complete_content)
+        # Anti-censorship handling
+        anti_censorship_cfg = get_anti_censorship_config()
+        if anti_censorship_cfg:
+            complete_content = TextCrypto.auto_decrypt_response(complete_content)
 
-    # 计算token使用量
-    prompt_tokens = len(str(openai_request.messages).split())
-    completion_tokens = len(complete_content.split())
+        # 计算token使用量
+        prompt_tokens = len(str(openai_request.messages).split())
+        completion_tokens = len(complete_content.split())
 
-    # 构建最终响应
-    openai_response = {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": openai_request.model,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": complete_content.strip()
-            },
-            "finish_reason": finish_reason
-        }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens
+        # 构建最终响应
+        openai_response = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": openai_request.model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": complete_content.strip()
+                },
+                "finish_reason": finish_reason
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
         }
-    }
 
-    logger.info(f"Successfully collected direct response: {len(complete_content)} chars, {completion_tokens} tokens")
-    return openai_response
+        logger.info(f"Successfully collected direct response: {len(complete_content)} chars, {completion_tokens} tokens, connection: {connection_id}")
+        return openai_response
+
+    except Exception as e:
+        logger.error(f"Failed to collect direct response, connection: {connection_id}: {str(e)}")
+        raise
 
 
 async def make_gemini_request_single_attempt(
@@ -784,16 +960,33 @@ async def make_gemini_request_single_attempt(
         model_name: str,
         timeout: float = 60.0
 ) -> Dict:
+    """
+    单次请求尝试，使用安全的请求包装器确保连接正确管理
+    """
     start_time = time.time()
+    connection_id = f"single_attempt_{uuid.uuid4().hex[:8]}"
 
     try:
         client = get_cached_client(gemini_key)
-        async with asyncio.timeout(timeout):
-            response_obj = await client.aio.models.generate_content(
+
+        # 使用安全的请求包装器
+        async def single_request(client):
+            return await client.aio.models.generate_content(
                 model=model_name,
                 contents=gemini_request["contents"],
                 config=gemini_request["generation_config"]
             )
+
+        response_obj = await safe_genai_request(
+            client=client,
+            request_func=single_request,
+            timeout_manager=timeout_manager,
+            connection_manager=connection_manager,
+            connection_id=connection_id,
+            has_tools=False,
+            is_stream=False
+        )
+
         response_time = time.time() - start_time
         # SDK 对象转 dict
         response_dict = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
@@ -802,13 +995,22 @@ async def make_gemini_request_single_attempt(
         )
         return response_dict
 
-    except asyncio.TimeoutError:
+    except HTTPException as e:
+        # 重新抛出HTTPException，因为safe_genai_request已经处理了超时和连接管理
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
         )
-        logger.warning(f"Key #{key_id} timeout after {response_time:.2f}s")
-        raise HTTPException(status_code=504, detail="Request timeout")
+
+        # 处理速率限制标记
+        err_msg = e.detail
+        if e.status_code == 429 or "rate_limit" in err_msg.lower() or "status: 429" in err_msg:
+            logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
+            db.update_gemini_key_status(key_id, 'rate_limited')
+        elif e.status_code >= 500:
+            logger.error(f"Key #{key_id} request error: {err_msg}")
+
+        raise
 
     except Exception as e:
         response_time = time.time() - start_time
@@ -817,11 +1019,7 @@ async def make_gemini_request_single_attempt(
         )
         # google-genai 会在异常中封装详细信息
         err_msg = str(e)
-        if "rate_limit" in err_msg.lower() or "status: 429" in err_msg:
-            logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
-            db.update_gemini_key_status(key_id, 'rate_limited')
-            raise HTTPException(status_code=429, detail="Rate limited")
-        logger.error(f"Key #{key_id} request error: {err_msg}")
+        logger.error(f"Key #{key_id} unexpected request error: {err_msg}")
         raise HTTPException(status_code=500, detail=err_msg)
 
 
@@ -996,26 +1194,23 @@ async def stream_gemini_response_single_attempt(
 ) -> AsyncGenerator[bytes, None]:
     """
     单次流式请求尝试，失败立即抛出异常，使用 google-genai SDK 实现
+    重构版：使用安全的请求包装器确保连接正确管理
     """
-    # 确定超时时间：工具调用或快速响应模式使用60秒，其他使用配置值
+    connection_id = f"stream_single_{uuid.uuid4().hex[:8]}"
+
+    # 确定是否需要工具调用
     has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
     is_fast_failover = await should_use_fast_failover()
-    if has_tool_calls:
-        timeout = 60.0  # 工具调用强制60秒超时
-        logger.info("Using extended 60s timeout for tool calls in streaming")
-    elif is_fast_failover:
-        timeout = 60.0  # 快速响应模式使用60秒超时
-        logger.info("Using extended 60s timeout for fast response mode in streaming")
-    else:
-        timeout = float(db.get_config('request_timeout', '60'))
 
-    logger.info(f"Starting single stream request to model: {model_name}")
+    logger.info(f"Starting single stream request to model: {model_name}, connection: {connection_id}")
 
     start_time = time.time()
 
     try:
         client = get_cached_client(gemini_key)
-        async with asyncio.timeout(timeout):
+
+        # 流式请求函数
+        async def stream_request(client):
             contents = gemini_request["contents"]
             # 流式接口直接使用contents和body参数
             genai_stream = await client.aio.models.generate_content_stream(
@@ -1024,17 +1219,7 @@ async def stream_gemini_response_single_attempt(
                 config=gemini_request.get("generation_config")
             )
 
-            if False:  # legacy httpx code disabled after migration to google-genai
-                    response_time = time.time() - start_time
-                    asyncio.create_task(
-                        update_key_performance_background(key_id, False, response_time)
-                    )
-
-                    error_text = await response.aread()
-                    error_msg = error_text.decode() if error_text else f"HTTP {response.status_code}"
-                    logger.error(f"Stream request failed with status {response.status_code}: {error_msg}")
-                    raise Exception(f"Stream request failed: {error_msg}")
-
+            # 初始化流式响应变量
             stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
             created = int(time.time())
             total_tokens = 0
@@ -1142,8 +1327,6 @@ async def stream_gemini_response_single_attempt(
                             await rate_limiter.add_usage(model_name, 1, total_tokens)
                             return
 
-
-
             # 如果正常结束但没有内容，抛出异常
             if not has_content:
                 logger.warning("Stream ended without content")
@@ -1175,12 +1358,20 @@ async def stream_gemini_response_single_attempt(
 
             await rate_limiter.add_usage(model_name, 1, total_tokens)
 
+        # 执行流式请求
+        await safe_genai_request(
+            client=client,
+            request_func=stream_request,
+            timeout_manager=timeout_manager,
+            connection_manager=connection_manager,
+            connection_id=connection_id,
+            has_tools=has_tool_calls,
+            is_stream=True
+        )
 
 
-    # except Exception as e:  # 原 httpx 超时连接异常移除
-    # Legacy httpx branch disabled after migration to google-genai
     except Exception as e:
-        logger.warning(f"Stream timeout/connection error: {str(e)}")
+        logger.warning(f"Stream timeout/connection error: {str(e)}, connection: {connection_id}")
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
