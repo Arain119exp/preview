@@ -1297,6 +1297,23 @@ async def stream_gemini_response_single_attempt(
                                         text_to_send = text
                                 else:
                                     text_to_send = text
+                                
+                                # Anti-censorship handling for stream
+                                anti_censorship_cfg = get_anti_censorship_config()
+                                if anti_censorship_cfg:
+                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text_to_send)})")
+                                    original_chunk = text_to_send
+                                    try:
+                                        chunk_start_time = time.time()
+                                        text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
+                                        decrypt_time = time.time() - chunk_start_time
+                                        if original_chunk != text_to_send:
+                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
+                                        else:
+                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
+                                    except Exception as e:
+                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
+
                                 full_response += text_to_send
 
                                 is_thought = getattr(part, "thought", False)
@@ -2038,14 +2055,21 @@ def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     if anti_censorship_cfg:
         # Inject anti-censorship prompt to the last user message
         for i in range(len(new_messages) - 1, -1, -1):
-            if new_messages[i].get('role') == 'user':
-                content = new_messages[i].get('content', '')
+            if new_messages[i].role == 'user':
+                content = new_messages[i].content
                 anti_censorship_prompt = AntiTruncation.get_anti_censorship_prompt()
                 if isinstance(content, str):
-                    new_messages[i]['content'] = f"{anti_censorship_prompt}\n\n{content}"
+                    new_messages[i] = ChatMessage(
+                        role='user', 
+                        content=f"{anti_censorship_prompt}\n\n{content}"
+                    )
                 elif isinstance(content, list):
-                    # Insert at the beginning of the content list
-                    new_messages[i]['content'].insert(0, anti_censorship_prompt)
+                    # Create new content list with anti-censorship prompt at the beginning
+                    new_content = [{"type": "text", "text": anti_censorship_prompt}] + content
+                    new_messages[i] = ChatMessage(
+                        role='user',
+                        content=new_content
+                    )
                 break
 
     return new_messages
