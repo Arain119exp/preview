@@ -933,7 +933,7 @@ async def collect_gemini_response_directly(
             complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
 
         # Anti-censorship handling
-        anti_censorship_cfg = get_anti_censorship_config()
+        anti_censorship_cfg = await get_anti_censorship_config()
         if anti_censorship_cfg:
             logger.info(f"🔓 Anti-censorship enabled for non-streaming response, processing content (length: {len(complete_content)})")
             original_content = complete_content
@@ -1298,8 +1298,8 @@ async def stream_gemini_response_single_attempt(
                                 else:
                                     text_to_send = text
                                 
-                                # Anti-censorship handling for stream
-                                anti_censorship_cfg = get_anti_censorship_config()
+ # Anti-censorship handling for stream
+                                anti_censorship_cfg = await get_anti_censorship_config()
                                 if anti_censorship_cfg:
                                     logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text_to_send)})")
                                     original_chunk = text_to_send
@@ -1998,14 +1998,12 @@ def get_actual_model_name(request_model: str) -> str:
 
     default_model = db.get_config('default_model_name', 'gemini-2.5-flash-lite')
     logger.info(f"Unsupported model: {request_model}, using default: {default_model}")
-def get_anti_censorship_config() -> bool:
+async def get_anti_censorship_config() -> bool:
     """获取防审查配置"""
     return db.get_config('anti_censorship_enabled', 'false').lower() == 'true'
 
-    return default_model
 
-
-def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
+async def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     """向消息中注入prompt"""
     inject_config = db.get_inject_prompt_config()
 
@@ -2051,7 +2049,7 @@ def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
         new_messages = AntiTruncation.inject_continuation_prompt(new_messages)
 
     # Anti-censorship prompt injection
-    anti_censorship_cfg = get_anti_censorship_config()
+    anti_censorship_cfg = await get_anti_censorship_config()
     if anti_censorship_cfg:
         # Inject anti-censorship prompt to the last user message
         for i in range(len(new_messages) - 1, -1, -1):
@@ -3005,7 +3003,7 @@ async def stream_gemini_response(
                                                 full_response += text_to_send
 
                                                 # Anti-censorship handling for stream
-                                                anti_censorship_cfg = get_anti_censorship_config()
+                                                anti_censorship_cfg = await get_anti_censorship_config()
                                                 if anti_censorship_cfg:
                                                     logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text)})")
                                                     original_chunk = text_to_send
@@ -3754,7 +3752,7 @@ async def chat_completions(
             )
 
         actual_model_name = get_actual_model_name(request.model)
-        request.messages = inject_prompt_to_messages(request.messages)
+        request.messages = await inject_prompt_to_messages(request.messages)
 
         # 使用增强版的转换函数，包含防检测功能
         gemini_request = openai_to_gemini(request, enable_anti_detection=True)
