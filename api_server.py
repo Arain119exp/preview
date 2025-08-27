@@ -29,7 +29,7 @@ from pydantic import BaseModel, ValidationError, validator
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import Database
-from experimental import AntiTruncation
+from experimental import AntiTruncation, TextCrypto
 
 # 配置日志
 logging.basicConfig(
@@ -742,6 +742,11 @@ async def collect_gemini_response_directly(
     anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
     if anti_trunc_cfg.get('enabled'):
         complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
+
+    # Anti-censorship handling for non-stream response
+    anti_censorship_cfg = get_anti_censorship_config()
+    if anti_censorship_cfg:
+        complete_content = TextCrypto.auto_decrypt_response(complete_content)
 
     # 计算token使用量
     prompt_tokens = len(str(openai_request.messages).split())
@@ -1759,6 +1764,10 @@ def get_actual_model_name(request_model: str) -> str:
 
     default_model = db.get_config('default_model_name', 'gemini-2.5-flash-lite')
     logger.info(f"Unsupported model: {request_model}, using default: {default_model}")
+def get_anti_censorship_config() -> bool:
+    """获取防审查配置"""
+    return db.get_config('anti_censorship_enabled', 'false').lower() == 'true'
+
     return default_model
 
 
@@ -1806,6 +1815,21 @@ def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     anti_truncation_cfg = db.get_anti_truncation_config()
     if anti_truncation_cfg.get('enabled'):
         new_messages = AntiTruncation.inject_continuation_prompt(new_messages)
+
+    # Anti-censorship prompt injection
+    anti_censorship_cfg = get_anti_censorship_config()
+    if anti_censorship_cfg:
+        # Inject anti-censorship prompt to the last user message
+        for i in range(len(new_messages) - 1, -1, -1):
+            if new_messages[i].get('role') == 'user':
+                content = new_messages[i].get('content', '')
+                anti_censorship_prompt = AntiTruncation.get_anti_censorship_prompt()
+                if isinstance(content, str):
+                    new_messages[i]['content'] = f"{anti_censorship_prompt}\n\n{content}"
+                elif isinstance(content, list):
+                    # Insert at the beginning of the content list
+                    new_messages[i]['content'].insert(0, anti_censorship_prompt)
+                break
 
     return new_messages
 
@@ -2736,7 +2760,13 @@ async def stream_gemini_response(
                                                         text_to_send = text
                                                 else:
                                                     text_to_send = text
+
                                                 full_response += text_to_send
+
+                                                # Anti-censorship handling for stream
+                                                anti_censorship_cfg = get_anti_censorship_config()
+                                                if anti_censorship_cfg:
+                                                    text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
 
                                                 is_thought = part.get("thought", False)
 
@@ -4037,6 +4067,45 @@ async def get_anti_truncation_config():
         return {"success": True, "anti_truncation_enabled": enabled}
     except Exception as e:
         logger.error(f"Failed to get anti-truncation config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/config/anti-censorship", summary="更新防审查配置", tags=["管理 API：配置"])
+async def update_anti_censorship_config(request: dict):
+    """
+    **更新防审查配置**
+
+    修改防审查功能的状态。
+    - **enabled**: `true` 或 `false`
+    """
+    try:
+        enabled = request.get('enabled')
+        if enabled is None:
+            raise HTTPException(status_code=422, detail="Parameter 'enabled' is required")
+        if db.set_config('anti_censorship_enabled', 'true' if enabled else 'false'):
+            logger.info(f"Anti-censorship enabled: {enabled}")
+            return {"success": True, "message": "Anti-censorship configuration updated successfully", "anti_censorship_enabled": enabled}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update anti-censorship configuration")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update anti-censorship config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/config/anti-censorship", summary="获取防审查配置", tags=["管理 API：配置"])
+async def get_anti_censorship_config():
+    """
+    **获取防审查配置**
+
+    返回防审查功能的当前状态。
+    """
+    try:
+        enabled = db.get_config('anti_censorship_enabled', 'false').lower() == 'true'
+        return {"success": True, "anti_censorship_enabled": enabled}
+    except Exception as e:
+        logger.error(f"Failed to get anti-censorship config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 保活管理端点

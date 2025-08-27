@@ -284,7 +284,10 @@ class Database:
 
             # 防截断配置
             ('anti_truncation_enabled', 'false', '是否启用防截断功能'),
-            
+
+            # 防审查配置
+            ('anti_censorship_enabled', 'false', '是否启用防审查功能'),
+
             # 流式模式配置
             ('stream_mode', 'auto', '流式模式设置: auto=自动, stream=流式, non_stream=非流式'),
         ]

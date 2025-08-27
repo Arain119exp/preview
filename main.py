@@ -2187,7 +2187,7 @@ if page == "控制台":
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpm, use_container_width=True, config={
+                st.plotly_chart(fig_rpm, config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -2227,7 +2227,7 @@ if page == "控制台":
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpd, use_container_width=True, config={
+                st.plotly_chart(fig_rpd, config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -2244,7 +2244,7 @@ if page == "控制台":
                 display_df.columns = ['模型', '分钟请求', '分钟限制', '分钟使用率', '日请求', '日限制', '日使用率']
                 display_df['分钟使用率'] = display_df['分钟使用率'].apply(lambda x: f"{x:.1f}%")
                 display_df['日使用率'] = display_df['日使用率'].apply(lambda x: f"{x:.1f}%")
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
+                st.dataframe(display_df, hide_index=True)
     else:
         st.info("暂无使用数据")
 
@@ -2428,7 +2428,7 @@ elif page == "密钥管理":
                                 status = key_info.get('status', 0)
                                 if key_id is not None:
                                     toggle_text = "禁用" if status == 1 else "激活"
-                                    if st.button(toggle_text, key=f"toggle_g_{key_id}", use_container_width=True):
+                                    if st.button(toggle_text, key=f"toggle_g_{key_id}"):
                                         if toggle_key_status('gemini', key_id):
                                             st.success("状态已更新")
                                             st.cache_data.clear()
@@ -2437,7 +2437,7 @@ elif page == "密钥管理":
 
                             with col6:
                                 if key_id is not None:
-                                    if st.button("删除", key=f"del_g_{key_id}", use_container_width=True):
+                                    if st.button("删除", key=f"del_g_{key_id}"):
                                         if delete_key('gemini', key_id):
                                             st.success("删除成功")
                                             st.cache_data.clear()
@@ -2539,7 +2539,7 @@ response = client.chat.completions.create(
 
                         with col4:
                             toggle_text = "停用" if key_info['status'] == 1 else "激活"
-                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", use_container_width=True):
+                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}"):
                                 if toggle_key_status('user', key_info['id']):
                                     st.success("状态已更新")
                                     st.cache_data.clear()
@@ -2547,7 +2547,7 @@ response = client.chat.completions.create(
                                     st.rerun()
 
                         with col5:
-                            if st.button("删除", key=f"del_u_{key_info['id']}", use_container_width=True):
+                            if st.button("删除", key=f"del_u_{key_info['id']}"):
                                 if delete_key('user', key_info['id']):
                                     st.success("删除成功")
                                     st.cache_data.clear()
@@ -2621,7 +2621,7 @@ elif page == "模型配置":
                     key=f"status_{model}"
                 )
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary"):
                 update_data = {
                     "single_api_rpm_limit": rpm,
                     "single_api_rpd_limit": rpd,
@@ -2651,7 +2651,7 @@ elif page == "系统设置":
 
     # 包含故障转移配置的标签页
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
-        "思考模式", "提示词注入", "流式模式", "负载均衡", "故障转移", "自动清理", "防检测", "防截断", "系统信息"
+        "思考模式", "提示词注入", "流式模式", "负载均衡", "故障转移", "自动清理", "防检测", "实验性", "系统信息"
     ])
 
     with tab1:
@@ -2724,7 +2724,7 @@ elif page == "系统设置":
             st.markdown("**配置说明**")
             st.info("思考模式会增加响应时间，但能显著提高复杂问题的回答质量。建议在需要深度分析的场景中启用。")
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary"):
                 update_data = {
                     "enabled": thinking_enabled,
                     "budget": budget_options[budget_option],
@@ -2821,7 +2821,7 @@ elif page == "系统设置":
             if char_count > 0:
                 st.caption(f"当前字符数: {char_count}")
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary"):
                 update_data = {
                     "enabled": inject_enabled,
                     "content": content,
@@ -2905,7 +2905,7 @@ elif page == "系统设置":
                 )
     
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary"):
                 update_data_stream = {"mode": selected_mode}
                 update_data_gemini = {"mode": selected_stg_mode}
 
@@ -3016,7 +3016,7 @@ elif page == "系统设置":
 
             st.markdown(f"**{strategy_options[strategy]}**: {strategy_descriptions[strategy]}")
 
-            if st.form_submit_button("保存策略", type="primary", use_container_width=True):
+            if st.form_submit_button("保存策略", type="primary"):
                 result = call_api('/admin/config/load-balance', 'POST', {
                     'load_balance_strategy': strategy
                 })
@@ -3131,14 +3131,12 @@ elif page == "系统设置":
                 with col1:
                     save_config = st.form_submit_button(
                         "保存配置",
-                        type="primary",
-                        use_container_width=True
+                        type="primary"
                     )
 
                 with col2:
                     refresh_stats = st.form_submit_button(
-                        "刷新统计",
-                        use_container_width=True
+                        "刷新统计"
                     )
 
                 # 处理表单提交
@@ -3359,8 +3357,7 @@ elif page == "系统设置":
 
                 with col2:
                     manual_cleanup = st.form_submit_button(
-                        "立即执行清理",
-                        use_container_width=True
+                        "立即执行清理"
                     )
 
                 # 处理表单提交
@@ -3541,7 +3538,7 @@ elif page == "系统设置":
                             st.error("更新防检测配置失败")
                 
                 with col2:
-                    if st.form_submit_button("测试防检测", use_container_width=True):
+                    if st.form_submit_button("测试防检测"):
                         test_result = call_api('/admin/test/anti-detection', 'POST')
                         if test_result and test_result.get('success'):
                             st.success("防检测功能测试成功")
@@ -3592,6 +3589,45 @@ elif page == "系统设置":
                         st.error("更新防截断配置失败")
         else:
             st.error("无法获取防截断配置数据")
+        # 防审查配置
+        st.markdown("##### 防审查配置")
+        st.markdown("启用或禁用防审查处理功能")
+
+        anti_censorship_conf = call_api('/admin/config/anti-censorship', 'GET')
+        if anti_censorship_conf is not None:
+            current_enabled = anti_censorship_conf.get('anti_censorship_enabled', False)
+            status_text = "已启用" if current_enabled else "已禁用"
+            status_color = "#10b981" if current_enabled else "#ef4444"
+            st.markdown(f'''
+            <div style="background: linear-gradient(135deg, rgba(168, 85, 247, 0.1) 0%, rgba(236, 72, 153, 0.1) 100%);
+                        border: 1px solid rgba(168, 85, 247, 0.2); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h5 style="margin: 0; color: #374151; font-size: 1.1rem;">防审查状态</h5>
+                        <p style="margin: 0.5rem 0 0 0; color: #6b7280; font-size: 0.9rem;">
+                            当前状态: {status_text}
+                        </p>
+                    </div>
+                    <div style="background: {status_color}; color: white; padding: 0.5rem 1rem; border-radius: 8px; font-weight: 500;">
+                        {status_text}
+                    </div>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+            with st.form("anti_censorship_form"):
+                enable_anti_censorship = st.checkbox("启用防审查功能", value=current_enabled)
+
+                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                    res = call_api('/admin/config/anti-censorship', 'POST', data={'enabled': enable_anti_censorship})
+                    if res and res.get('success'):
+                        st.success("防审查配置已更新")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("更新防审查配置失败")
+        else:
+            st.error("无法获取防审查配置数据")
 
     with tab9:
         st.markdown("#### 系统信息")
