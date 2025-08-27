@@ -1241,10 +1241,6 @@ async def stream_gemini_response_single_attempt(
     has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
     is_fast_failover = await should_use_fast_failover()
 
-    # 在函数入口处一次性获取配置
-    anti_censorship_enabled = await get_anti_censorship_config()
-    logger.info(f"Anti-censorship config for request {connection_id}: {anti_censorship_enabled}")
-
     logger.info(f"Starting single stream request to model: {model_name}, connection: {connection_id}")
 
     start_time = time.time()
@@ -1274,6 +1270,7 @@ async def stream_gemini_response_single_attempt(
             processed_lines = 0
             # Anti-truncation related variables
             anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+            anti_censorship_cfg = await get_anti_censorship_config()
             full_response = ""
             saw_finish_tag = False
 
@@ -1303,14 +1300,19 @@ async def stream_gemini_response_single_attempt(
                                     text_to_send = text
                                 
                                 # Anti-censorship handling for stream
-                                if anti_censorship_enabled:
+                                if anti_censorship_cfg:
+                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text_to_send)})")
                                     original_chunk = text_to_send
                                     try:
+                                        chunk_start_time = time.time()
                                         text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
-if original_chunk != text_to_send:
-                                            logger.info(f"✅ Chunk decrypted for connection {connection_id}")
+                                        decrypt_time = time.time() - chunk_start_time
+                                        if original_chunk != text_to_send:
+                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
+                                        else:
+                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
                                     except Exception as e:
-                                        logger.warning(f"❌ Chunk decryption failed for connection {connection_id}: {str(e)}")
+                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
 
                                 full_response += text_to_send
 
@@ -2841,10 +2843,6 @@ async def stream_gemini_response(
     """处理Gemini的流式响应，记录性能指标"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
     
-    # 在函数入口处一次性获取配置
-    anti_censorship_enabled = await get_anti_censorship_config()
-    logger.info(f"Anti-censorship config for traditional stream: {anti_censorship_enabled}")
-
     # 确定超时时间：工具调用或快速响应模式使用60秒，其他使用配置值
     has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
     is_fast_failover = await should_use_fast_failover()
@@ -3005,14 +3003,28 @@ async def stream_gemini_response(
                                                 full_response += text_to_send
 
                                                 # Anti-censorship handling for stream
-                                                if anti_censorship_enabled:
+                                                anti_censorship_cfg = await get_anti_censorship_config()
+                                                if anti_censorship_cfg:
+                                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text)})")
                                                     original_chunk = text_to_send
                                                     try:
+                                                        start_time = time.time()
                                                         text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
-                                                        if original_chunk != text_to_send:
-                                                            logger.info("✅ Traditional stream chunk decrypted")
+                                                        decrypt_time = time.time() - start_time
+
+                                                        # 检测内容是否发生变化
+                                                        chunk_changed = original_chunk != text_to_send
+
+                                                        if chunk_changed:
+                                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
+                                                            logger.debug(f"📝 Chunk changed: '{original_chunk[:50]}...' -> '{text_to_send[:50]}...'")
+                                                        else:
+                                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
+
                                                     except Exception as e:
-                                                        logger.warning(f"❌ Traditional stream chunk decryption failed: {str(e)}")
+                                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
+                                                        logger.debug(f"Error details", exc_info=True)
+                                                        # 解密失败时保持原始内容
 
                                                 is_thought = part.get("thought", False)
 
