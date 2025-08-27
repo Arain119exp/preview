@@ -123,6 +123,7 @@ async def safe_genai_request(
 ) -> Any:
     """
     安全的GenAI请求包装器，确保连接正确管理
+    支持普通协程和异步生成器
     """
     try:
         # 注册连接
@@ -131,12 +132,23 @@ async def safe_genai_request(
         # 获取适当的超时时间
         timeout = timeout_manager.get_timeout(has_tools, is_stream)
 
-        # 执行请求
+        # 执行请求 - 检测是否为异步生成器
         async with asyncio.timeout(timeout):
-            result = await request_func(client, **kwargs)
+            result = request_func(client, **kwargs)
 
-        # 成功完成，注销连接
-        await connection_manager.unregister_connection(connection_id)
+            # 检查是否为异步生成器
+            if hasattr(result, '__aiter__') and hasattr(result, '__anext__'):
+                # 异步生成器：直接返回，不使用await
+                # 注意：异步生成器的生命周期管理需要在调用方处理
+                return result
+            else:
+                # 普通协程：使用await执行
+                result = await result
+
+        # 对于非流式请求，成功完成时注销连接
+        # 对于流式请求，连接将在生成器耗尽时由调用方注销
+        if not is_stream:
+            await connection_manager.unregister_connection(connection_id)
 
         return result
 
@@ -619,38 +631,6 @@ async def keep_alive_ping():
                     logger.warning(f"🟡 Keep-alive ping warning: {response.status}")
     except Exception as e:
         logger.warning(f"🔴 Keep-alive ping failed: {e}")
-
-
-# 每小时健康检测函数
-async def record_hourly_health_check():
-    """每小时记录一次健康检测结果"""
-    try:
-        available_keys = db.get_available_gemini_keys()
-
-        for key_info in available_keys:
-            key_id = key_info['id']
-
-            # 执行健康检测
-            health_result = await check_gemini_key_health(key_info['key'])
-
-            # 记录到历史表
-            db.record_daily_health_status(
-                key_id,
-                health_result['healthy'],
-                health_result['response_time']
-            )
-
-            # 更新性能指标
-            db.update_key_performance(
-                key_id,
-                health_result['healthy'],
-                health_result['response_time']
-            )
-
-        logger.info(f"✅ Hourly health check completed for {len(available_keys)} keys")
-
-    except Exception as e:
-        logger.error(f"❌ Hourly health check failed: {e}")
 
 
 # 自动清理函数
@@ -1751,13 +1731,6 @@ async def lifespan(app: FastAPI):
     # 初始化防检测系统
     init_anti_detection_config()
 
-    # 启动时执行一次健康检测
-    try:
-        logger.info("🔍 Performing initial health check for all API keys...")
-        await record_hourly_health_check()
-        logger.info("✅ Initial health check completed")
-    except Exception as e:
-        logger.error(f"❌ Initial health check failed: {e}")
 
     # 检查是否启用保活功能
     enable_keep_alive = os.getenv('ENABLE_KEEP_ALIVE', 'true').lower() == 'true'
@@ -1787,15 +1760,6 @@ async def lifespan(app: FastAPI):
                 max_instances=1
             )
 
-            # 每小时健康检测任务
-            scheduler.add_job(
-                record_hourly_health_check,
-                'interval',
-                hours=1,
-                id='hourly_health_check',
-                max_instances=1,
-                coalesce=True
-            )
 
             # 每天凌晨2点自动清理任务
             scheduler.add_job(
@@ -4344,15 +4308,6 @@ async def toggle_keep_alive():
                 max_instances=1
             )
 
-            # 重新添加健康检测和自动清理任务
-            scheduler.add_job(
-                record_hourly_health_check,
-                'interval',
-                hours=1,
-                id='hourly_health_check',
-                max_instances=1,
-                coalesce=True
-            )
 
             scheduler.add_job(
                 auto_cleanup_failed_keys,

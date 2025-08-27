@@ -45,7 +45,7 @@ def call_api(endpoint: str, method: str = 'GET', data: Any = None, timeout: int 
                 response = requests.post(url, json=data, timeout=timeout)
             elif method == 'DELETE':
                 response = requests.delete(url, timeout=timeout)
-
+            else:
                 raise ValueError(f"不支持的方法: {method}")
 
             if response.status_code == 200:
