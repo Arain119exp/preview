@@ -935,7 +935,29 @@ async def collect_gemini_response_directly(
         # Anti-censorship handling
         anti_censorship_cfg = get_anti_censorship_config()
         if anti_censorship_cfg:
-            complete_content = TextCrypto.auto_decrypt_response(complete_content)
+            logger.info(f"🔓 Anti-censorship enabled for non-streaming response, processing content (length: {len(complete_content)})")
+            original_content = complete_content
+            try:
+                start_time = time.time()
+                complete_content = TextCrypto.auto_decrypt_response(complete_content)
+                decrypt_time = time.time() - start_time
+
+                # 检测内容是否发生变化
+                content_changed = original_content != complete_content
+                original_preview = original_content[:100] + "..." if len(original_content) > 100 else original_content
+                decrypted_preview = complete_content[:100] + "..." if len(complete_content) > 100 else complete_content
+
+                if content_changed:
+                    logger.info(f"✅ Anti-censorship decryption successful - content changed (time: {decrypt_time:.3f}s)")
+                    logger.debug(f"📝 Original: '{original_preview}' -> Decrypted: '{decrypted_preview}'")
+                else:
+                    logger.info(f"ℹ️ Anti-censorship decryption completed - no changes detected (time: {decrypt_time:.3f}s)")
+                    logger.debug(f"📝 Content unchanged: '{original_preview}'")
+
+            except Exception as e:
+                logger.error(f"❌ Anti-censorship decryption failed: {str(e)}, continuing with original content")
+                logger.debug(f"Error details", exc_info=True)
+                # 解密失败时保持原始内容
 
         # 计算token使用量
         prompt_tokens = len(str(openai_request.messages).split())
@@ -2961,7 +2983,26 @@ async def stream_gemini_response(
                                                 # Anti-censorship handling for stream
                                                 anti_censorship_cfg = get_anti_censorship_config()
                                                 if anti_censorship_cfg:
-                                                    text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
+                                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text)})")
+                                                    original_chunk = text_to_send
+                                                    try:
+                                                        start_time = time.time()
+                                                        text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
+                                                        decrypt_time = time.time() - start_time
+
+                                                        # 检测内容是否发生变化
+                                                        chunk_changed = original_chunk != text_to_send
+
+                                                        if chunk_changed:
+                                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
+                                                            logger.debug(f"📝 Chunk changed: '{original_chunk[:50]}...' -> '{text_to_send[:50]}...'")
+                                                        else:
+                                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
+
+                                                    except Exception as e:
+                                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
+                                                        logger.debug(f"Error details", exc_info=True)
+                                                        # 解密失败时保持原始内容
 
                                                 is_thought = part.get("thought", False)
 
