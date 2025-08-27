@@ -29,6 +29,7 @@ from pydantic import BaseModel, ValidationError, validator
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import Database
+from experimental import AntiTruncation
 
 # 配置日志
 logging.basicConfig(
@@ -740,42 +741,7 @@ async def collect_gemini_response_directly(
     # Anti-truncation handling for non-stream response
     anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
     if anti_trunc_cfg.get('enabled'):
-        max_attempts = anti_trunc_cfg.get('max_attempts', 3)
-        attempt = 0
-        while True:
-            trimmed = complete_content.rstrip()
-            if trimmed.endswith('[finish]'):
-                complete_content = trimmed[:-8].rstrip()
-                break
-            if attempt >= max_attempts:
-                logger.info("Anti-truncation enabled but reached max attempts without [finish].")
-                break
-            attempt += 1
-            logger.info(f"Anti-truncation attempt {attempt}: continue fetching content")
-            # 构造新的请求，在末尾追加继续提示
-            continuation_request = copy.deepcopy(gemini_request)
-            continuation_request['contents'].append({
-                "role": "user",
-                "parts": [{
-                    "text": "继续，请以 [finish] 结尾"
-                }]
-            })
-            try:
-                cont_response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=continuation_request["contents"],
-                    config=continuation_request.get("generation_config")
-                )
-                data = cont_response.to_dict() if hasattr(cont_response, "to_dict") else json.loads(cont_response.model_dump_json())
-                for candidate in data.get("candidates", []):
-                    for part in candidate.get("content", {}).get("parts", []):
-                        text = part.get("text", "")
-                        if text:
-                            complete_content += text
-                            total_tokens += len(text.split())
-            except Exception as e:
-                logger.warning(f"Anti-truncation continuation attempt failed: {e}")
-                break
+        complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
 
     # 计算token使用量
     prompt_tokens = len(str(openai_request.messages).split())
@@ -866,6 +832,14 @@ async def make_request_with_fast_failover(
     """
     available_keys = db.get_available_gemini_keys()
 
+    # 防御性检查：确保 available_keys 不为 None
+    if available_keys is None:
+        logger.error("get_available_gemini_keys() returned None in fast failover")
+        raise HTTPException(
+            status_code=503,
+            detail="Database error: unable to retrieve API keys"
+        )
+
     if not available_keys:
         logger.error("No available keys for request")
         raise HTTPException(
@@ -890,8 +864,13 @@ async def make_request_with_fast_failover(
                 excluded_keys=set(failed_keys)
             )
 
-            if not selection_result:
-                logger.warning(f"No more available keys after {attempt} attempts")
+            # 增强的空值检查
+            if selection_result is None:
+                logger.warning(f"select_gemini_key_and_check_limits returned None on attempt {attempt + 1}")
+                break
+            
+            if 'key_info' not in selection_result:
+                logger.error(f"Invalid selection_result format on attempt {attempt + 1}: missing 'key_info'")
                 break
 
             key_info = selection_result['key_info']
@@ -1826,14 +1805,7 @@ def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     # Anti-truncation prompt injection
     anti_truncation_cfg = db.get_anti_truncation_config()
     if anti_truncation_cfg.get('enabled'):
-        for i in range(len(new_messages) - 1, -1, -1):
-            if new_messages[i].role == 'user':
-                suffix = "请以 [finish] 结尾"
-                if isinstance(new_messages[i].content, str):
-                    new_messages[i] = ChatMessage(role='user', content=f"{new_messages[i].content}\n\n{suffix}")
-                elif isinstance(new_messages[i].content, list):
-                    new_messages[i].content.append(suffix)
-                break
+        new_messages = AntiTruncation.inject_continuation_prompt(new_messages)
 
     return new_messages
 
@@ -2192,6 +2164,12 @@ async def select_gemini_key_and_check_limits(model_name: str, excluded_keys: set
         excluded_keys = set()
 
     available_keys = db.get_available_gemini_keys()
+    
+    # 防御性检查：确保 available_keys 不为 None
+    if available_keys is None:
+        logger.error("get_available_gemini_keys() returned None")
+        return None
+    
     available_keys = [k for k in available_keys if k['id'] not in excluded_keys]
 
     if not available_keys:

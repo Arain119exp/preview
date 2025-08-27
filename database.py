@@ -138,6 +138,19 @@ class Database:
             # 检查并迁移旧表结构
             self._migrate_database(cursor)
 
+            # 实验性功能配置表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS experimental_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feature_type TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(feature_type, model_name)
+                )
+            ''')
+
             # 创建索引
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model_name)')
@@ -150,6 +163,7 @@ class Database:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_health_history_date ON health_check_history(check_date)')
             cursor.execute(
                 'CREATE INDEX IF NOT EXISTS idx_health_history_key_date ON health_check_history(gemini_key_id, check_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_experimental_feature ON experimental_configs(feature_type, model_name)')
 
             # 初始化系统配置
             self._init_system_config(cursor)
@@ -1517,3 +1531,148 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to mark keys for health check: {e}")
             return []
+
+    # 实验性功能配置管理
+    def get_experimental_feature_config(self, feature_type: str, model_name: str) -> bool:
+        """获取特定模型的实验性功能配置"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT enabled FROM experimental_configs
+                    WHERE feature_type = ? AND model_name = ?
+                ''', (feature_type, model_name))
+                
+                row = cursor.fetchone()
+                return bool(row['enabled']) if row else False
+        except Exception as e:
+            logger.error(f"Failed to get experimental feature config for {feature_type}/{model_name}: {e}")
+            return False
+
+    def set_experimental_feature_config(self, feature_type: str, model_name: str, enabled: bool) -> bool:
+        """设置特定模型的实验性功能配置"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO experimental_configs 
+                    (feature_type, model_name, enabled, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (feature_type, model_name, int(enabled)))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to set experimental feature config for {feature_type}/{model_name}: {e}")
+            return False
+
+    def get_all_experimental_configs(self) -> List[Dict]:
+        """获取所有实验性功能配置"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM experimental_configs 
+                    ORDER BY feature_type, model_name
+                ''')
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get all experimental configs: {e}")
+            return []
+
+    def get_model_experimental_configs(self, model_name: str) -> Dict[str, bool]:
+        """获取特定模型的所有实验性功能配置"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT feature_type, enabled FROM experimental_configs
+                    WHERE model_name = ?
+                ''', (model_name,))
+                
+                configs = {}
+                for row in cursor.fetchall():
+                    configs[row['feature_type']] = bool(row['enabled'])
+                
+                return configs
+        except Exception as e:
+            logger.error(f"Failed to get experimental configs for model {model_name}: {e}")
+            return {}
+
+    def is_feature_enabled(self, feature_type: str, model_name: str) -> bool:
+        """检查特定功能是否为特定模型启用"""
+        return self.get_experimental_feature_config(feature_type, model_name)
+
+    def get_available_experimental_features(self) -> List[str]:
+        """获取可用的实验性功能类型列表"""
+        return [
+            'anti_truncation',      # 防截断功能
+            'anti_censorship',      # 防审查功能  
+            'encryption_support',   # 加密支持
+            'prompt_injection'      # 提示词注入
+        ]
+
+    def init_experimental_features_for_model(self, model_name: str) -> bool:
+        """为新模型初始化实验性功能配置（默认关闭）"""
+        try:
+            features = self.get_available_experimental_features()
+            for feature in features:
+                self.set_experimental_feature_config(feature, model_name, False)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to init experimental features for model {model_name}: {e}")
+            return False
+
+    def reset_experimental_features(self) -> bool:
+        """重置所有实验性功能配置"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM experimental_configs')
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to reset experimental features: {e}")
+            return False
+
+    def get_experimental_features_summary(self) -> Dict:
+        """获取实验性功能使用汇总"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 按功能类型统计
+                cursor.execute('''
+                    SELECT feature_type, COUNT(*) as total, SUM(enabled) as enabled_count
+                    FROM experimental_configs
+                    GROUP BY feature_type
+                ''')
+                
+                feature_stats = {}
+                for row in cursor.fetchall():
+                    feature_stats[row['feature_type']] = {
+                        'total_models': row['total'],
+                        'enabled_models': row['enabled_count']
+                    }
+                
+                # 按模型统计  
+                cursor.execute('''
+                    SELECT model_name, COUNT(*) as total, SUM(enabled) as enabled_count
+                    FROM experimental_configs
+                    GROUP BY model_name
+                ''')
+                
+                model_stats = {}
+                for row in cursor.fetchall():
+                    model_stats[row['model_name']] = {
+                        'total_features': row['total'],
+                        'enabled_features': row['enabled_count']
+                    }
+                
+                return {
+                    'feature_stats': feature_stats,
+                    'model_stats': model_stats
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get experimental features summary: {e}")
+            return {'feature_stats': {}, 'model_stats': {}}
