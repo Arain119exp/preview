@@ -3541,10 +3541,10 @@ elif page == "系统设置":
                             st.error("更新防检测配置失败")
                 
                 with col2:
-            # 移除统计信息和测试按钮
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
-                update_data = {
-                    'enabled': enabled,
+                    # 移除统计信息和测试按钮
+                    if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                        update_data = {
+                            'enabled': enabled,
                     'disable_for_tools': disable_for_tools,
                     'token_threshold': token_threshold
                 }
@@ -3563,27 +3563,27 @@ elif page == "系统设置":
         st.markdown("#### 实验性功能")
         st.warning("此处的功能可能不稳定或导致非预期的结果，请谨慎使用。")
 
-        # 加密通信
-        st.markdown("##### 加密通信 (防审查)")
+        # 防审查
+        st.markdown("##### 防审查")
         st.markdown("启用后，将要求模型加密回复，由服务器自动解密后返回给用户。")
         e2e_config_data = call_api('/admin/config/e2e-encryption')
         if e2e_config_data and e2e_config_data.get('success'):
             e2e_enabled = st.checkbox(
-                "启用加密通信", 
+                "启用防审查", 
                 value=e2e_config_data.get('enabled', False),
                 key="e2e_encryption_toggle"
             )
             if e2e_enabled != e2e_config_data.get('enabled', False):
                 result = call_api('/admin/config/e2e-encryption', 'POST', data={'enabled': e2e_enabled})
                 if result and result.get('success'):
-                    st.success("加密通信状态已更新")
+                    st.success("防审查状态已更新")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
                 else:
                     st.error("更新失败")
         else:
-            st.error("无法加载加密通信配置")
+            st.error("无法加载防审查配置")
 
         st.markdown('<hr style="margin: 2rem 0;">', unsafe_allow_html=True)
         
