@@ -56,50 +56,6 @@ def get_cached_client(api_key: str) -> genai.Client:
         _client_cache[api_key] = client
     return client
 
-
-# --- 加解密函数 ---
-def encrypt(text: str) -> str:
-    """
-    对文本进行加密
-    """
-    encrypted_parts = []
-    for char in text:
-        cp = ord(char)
-        hex_cp = f'{cp:08x}'
-        
-        new_hex_parts = []
-        for i in range(0, 8, 2):
-            byte = int(hex_cp[i:i+2], 16)
-            xor_byte = byte ^ 0x5A
-            new_hex_parts.append(f'{xor_byte:02x}')
-        
-        encrypted_parts.append("".join(new_hex_parts))
-        
-    return "".join(encrypted_parts)
-
-def decrypt(cipher_text: str) -> str:
-    """
-    对密文进行解密
-    """
-    decrypted_text = ""
-    if len(cipher_text) % 8 != 0:
-        raise ValueError("Invalid cipher text length")
-        
-    for i in range(0, len(cipher_text), 8):
-        group = cipher_text[i:i+8]
-        
-        hex_parts = []
-        for j in range(0, 8, 2):
-            byte = int(group[j:j+2], 16)
-            xor_byte = byte ^ 0x5A
-            hex_parts.append(f'{xor_byte:02x}')
-            
-        hex_cp = "".join(hex_parts)
-        cp = int(hex_cp, 16)
-        decrypted_text += chr(cp)
-        
-    return decrypted_text
-
 # 防自动化检测注入器
 class GeminiAntiDetectionInjector:
     """
@@ -233,6 +189,35 @@ class GeminiAntiDetectionInjector:
             'request_history_size': len(self.request_history),
             'max_history_size': self.max_history_size
         }
+
+
+def decrypt_response(hex_string: str) -> str:
+    """
+    解密经过特定XOR加密的十六进制字符串。
+    """
+    if not isinstance(hex_string, str) or not hex_string or len(hex_string) % 8 != 0:
+        return hex_string
+
+    try:
+        # 优化检查，只检查一次
+        if not all(c in '0123456789abcdef' for c in hex_string.lower()):
+            return hex_string
+
+        txt = ''
+        for i in range(0, len(hex_string), 8):
+            codepoint = 0
+            hex_block = hex_string[i:i+8]
+            
+            for j in range(0, 8, 2):
+                byte_hex = hex_block[j:j+2]
+                byte_val = int(byte_hex, 16)
+                decrypted_byte = byte_val ^ 0x5A
+                codepoint = (codepoint << 8) | decrypted_byte
+            
+            txt += chr(codepoint)
+        return txt
+    except (ValueError, TypeError):
+        return hex_string
 
 
 # 思考配置模型
@@ -393,13 +378,6 @@ class ChatCompletionRequest(BaseModel):
             data['max_tokens'] = max(1, data['max_tokens'])
 
         super().__init__(**data)
-
-# --- 加解密模型 ---
-class EncryptRequest(BaseModel):
-    text: str
-
-class DecryptRequest(BaseModel):
-    cipher: str
 
 # 内存缓存用于RPM/TPM限制
 class RateLimitCache:
@@ -832,6 +810,15 @@ async def collect_gemini_response_directly(
     prompt_tokens = len(str(openai_request.messages).split())
     completion_tokens = len(complete_content.split())
 
+    # 如果启用了响应解密，则解密内容
+    decryption_enabled = db.get_response_decryption_config().get('enabled', False)
+    if decryption_enabled:
+        logger.info(f"Decrypting response. Original length: {len(complete_content)}")
+        final_content = decrypt_response(complete_content.strip())
+        logger.info(f"Decrypted length: {len(final_content)}")
+    else:
+        final_content = complete_content.strip()
+
     # 构建最终响应
     openai_response = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
@@ -842,7 +829,7 @@ async def collect_gemini_response_directly(
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": complete_content.strip()
+                "content": final_content
             },
             "finish_reason": finish_reason
         }],
@@ -1849,31 +1836,10 @@ def get_actual_model_name(request_model: str) -> str:
 
 def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     """向消息中注入prompt"""
-    new_messages = messages.copy()
-    
-    # 端到端加密注入
-    e2e_config = db.get_e2e_encryption_config()
-    if e2e_config.get('enabled'):
-        encryption_prompt = (
-            "【加密指令】\n"
-            "你接下来要说的话，必须先用以下算法转成密文再输出：\n"
-            "1. 把每个字符按 UTF-32BE 编码为 8 位十六进制（大端，无 0x，补零）。\n"
-            "2. 对该十六进制字符串逐字节与 0x5A 异或。\n"
-            "3. 把异或后的 8 位十六进制串直接连在一起输出，不要空格或其他符号。"
-        )
-        # 注入到最后一个用户消息的末尾
-        for i in range(len(new_messages) - 1, -1, -1):
-            if new_messages[i].role == 'user':
-                original_content = new_messages[i].get_text_content()
-                new_content = f"{original_content}\n\n{encryption_prompt}"
-                new_messages[i] = ChatMessage(role='user', content=new_content)
-                break
-
-    # 常规Prompt注入
     inject_config = db.get_inject_prompt_config()
 
     if not inject_config['enabled'] or not inject_config['content']:
-        return new_messages
+        return messages
 
     content = inject_config['content']
     position = inject_config['position']
@@ -2201,14 +2167,6 @@ def gemini_to_openai(gemini_response: Dict, request: ChatCompletionRequest, usag
 
     include_thoughts = request.thinking_config and request.thinking_config.include_thoughts
     thoughts, content = extract_thoughts_and_content(gemini_response, include_thoughts)
-
-    # 自动解密
-    e2e_config = db.get_e2e_encryption_config()
-    if e2e_config.get('enabled'):
-        try:
-            content = decrypt(content.strip())
-        except Exception as e:
-            logger.warning(f"Failed to decrypt content: {e}. Returning original content.")
 
     for i, candidate in enumerate(gemini_response.get("candidates", [])):
         message_content = content if content else ""
@@ -3616,6 +3574,12 @@ async def chat_completions(
         should_stream = request.stream  # 默认跟随用户请求
         logger.info(f"DEBUG: request.stream={request.stream}, stream_mode={stream_mode}, has_tool_calls={has_tool_calls}")
         
+        # 如果启用了响应解密，则强制使用非流式模式
+        decryption_enabled = db.get_response_decryption_config().get('enabled', False)
+        if decryption_enabled:
+            should_stream = False
+            logger.info("Response decryption is enabled, forcing non-streaming mode.")
+
         # 工具调用强制使用非流式模式
         if has_tool_calls:
             should_stream = False
@@ -4009,46 +3973,6 @@ async def get_failover_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 加密解密端点
-@app.post("/admin/crypto/encrypt", summary="加密文本", tags=["管理 API：工具"])
-async def encrypt_text(request: EncryptRequest):
-    """
-    **加密文本**
-
-    使用项目指定的算法加密一段文本。
-    """
-    try:
-        encrypted_text = encrypt(request.text)
-        return {
-            "success": True,
-            "original_text": request.text,
-            "encrypted_text": encrypted_text
-        }
-    except Exception as e:
-        logger.error(f"Encryption failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/admin/crypto/decrypt", summary="解密文本", tags=["管理 API：工具"])
-async def decrypt_text(request: DecryptRequest):
-    """
-    **解密文本**
-
-    使用项目指定的算法解密一段密文。
-    """
-    try:
-        decrypted_text = decrypt(request.cipher)
-        return {
-            "success": True,
-            "cipher_text": request.cipher,
-            "decrypted_text": decrypted_text
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Decryption failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # 防检测管理端点
 @app.post("/admin/config/anti-detection", summary="更新防检测配置", tags=["管理 API：配置"])
 async def update_anti_detection_config(request: dict):
@@ -4201,48 +4125,45 @@ async def get_anti_truncation_config():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 端到端加密管理端点
-@app.post("/admin/config/e2e-encryption", summary="更新端到端加密配置", tags=["管理 API：配置"])
-async def update_e2e_encryption_config(request: dict):
+# 响应解密管理端点
+@app.get("/admin/config/response-decryption", summary="获取响应解密配置", tags=["管理 API：配置"])
+async def get_response_decryption_config():
     """
-    **更新端到端加密配置**
+    **获取响应解密配置**
 
-    修改端到端加密功能的状态。
+    返回响应自动解密功能的当前状态。
+    """
+    try:
+        config = db.get_response_decryption_config()
+        return {"success": True, **config}
+    except Exception as e:
+        logger.error(f"Failed to get response decryption config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/config/response-decryption", summary="更新响应解密配置", tags=["管理 API：配置"])
+async def update_response_decryption_config(request: dict):
+    """
+    **更新响应解密配置**
+
+    修改响应自动解密功能的状态。
     - **enabled**: `true` 或 `false`
     """
     try:
         enabled = request.get('enabled')
         if enabled is None:
             raise HTTPException(status_code=422, detail="Parameter 'enabled' is required")
-        
-        if db.set_e2e_encryption_config(enabled=enabled):
-            logger.info(f"E2E Encryption enabled: {enabled}")
-            return {
-                "success": True,
-                "message": "E2E encryption configuration updated successfully",
-                "e2e_encryption_enabled": enabled
-            }
+        if db.set_response_decryption_config(enabled=enabled):
+            logger.info(f"Response decryption enabled: {enabled}")
+            return {"success": True, "message": "Response decryption configuration updated successfully"}
         else:
-            raise HTTPException(status_code=500, detail="Failed to update E2E encryption configuration")
+            raise HTTPException(status_code=500, detail="Failed to update response decryption configuration")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update E2E encryption config: {str(e)}")
+        logger.error(f"Failed to update response decryption config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/admin/config/e2e-encryption", summary="获取端到端加密配置", tags=["管理 API：配置"])
-async def get_e2e_encryption_config():
-    """
-    **获取端到端加密配置**
-
-    返回端到端加密功能的当前状态。
-    """
-    try:
-        config = db.get_e2e_encryption_config()
-        return {"success": True, **config}
-    except Exception as e:
-        logger.error(f"Failed to get E2E encryption config: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 # 保活管理端点
 @app.post("/admin/keep-alive/toggle", summary="切换保活状态", tags=["管理 API：配置"])

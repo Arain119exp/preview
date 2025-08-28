@@ -270,12 +270,12 @@ class Database:
 
             # 防截断配置
             ('anti_truncation_enabled', 'false', '是否启用防截断功能'),
+
+            # 响应解密配置
+            ('enable_response_decryption', 'false', '是否启用响应自动解密'),
             
             # 流式模式配置
             ('stream_mode', 'auto', '流式模式设置: auto=自动, stream=流式, non_stream=非流式'),
-
-            # 端到端加密配置
-            ('end_to_end_encryption_enabled', 'false', '是否启用端到端加密'),
         ]
 
         for key, value, description in default_configs:
@@ -581,27 +581,27 @@ class Database:
             logger.error(f"Failed to set anti truncation config: {e}")
             return False
 
-    # 端到端加密配置
-    def get_e2e_encryption_config(self) -> Dict[str, any]:
-        """获取端到端加密配置"""
+    # 响应解密配置方法
+    def get_response_decryption_config(self) -> Dict[str, any]:
+        """获取响应解密配置"""
         try:
             return {
-                'enabled': self.get_config('end_to_end_encryption_enabled', 'false').lower() == 'true'
+                'enabled': self.get_config('enable_response_decryption', 'false').lower() == 'true'
             }
         except Exception as e:
-            logger.error(f"Failed to get e2e encryption config: {e}")
+            logger.error(f"Failed to get response decryption config: {e}")
             return {'enabled': False}
 
-    def set_e2e_encryption_config(self, enabled: bool = None) -> bool:
-        """设置端到端加密配置"""
+    def set_response_decryption_config(self, enabled: bool = None) -> bool:
+        """设置响应解密配置"""
         try:
             if enabled is not None:
-                self.set_config('end_to_end_encryption_enabled', 'true' if enabled else 'false')
+                self.set_config('enable_response_decryption', 'true' if enabled else 'false')
             return True
         except Exception as e:
-            logger.error(f"Failed to set e2e encryption config: {e}")
+            logger.error(f"Failed to set response decryption config: {e}")
             return False
-
+            
     # 模型配置管理
     def get_supported_models(self) -> List[str]:
         """获取支持的模型列表"""
