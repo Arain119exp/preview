@@ -29,180 +29,6 @@ from pydantic import BaseModel, ValidationError, validator
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import Database
-from experimental import AntiTruncation, TextCrypto
-
-# 统一超时管理器
-class TimeoutManager:
-    """
-    统一超时管理器，用于管理不同场景下的超时配置
-    """
-    def __init__(self):
-        self.default_timeout = 60.0
-        self.tool_timeout = 60.0
-        self.stream_timeout = 60.0
-
-    def get_timeout(self, has_tools: bool = False, is_stream: bool = False) -> float:
-        """
-        根据请求类型获取适当的超时时间
-        """
-        if has_tools:
-            return self.tool_timeout
-        elif is_stream:
-            return self.stream_timeout
-        return self.default_timeout
-
-    def set_timeout(self, timeout_type: str, value: float):
-        """
-        设置特定类型的超时时间
-        """
-        if timeout_type == 'default':
-            self.default_timeout = value
-        elif timeout_type == 'tool':
-            self.tool_timeout = value
-        elif timeout_type == 'stream':
-            self.stream_timeout = value
-
-# 连接生命周期管理器
-class ConnectionLifecycleManager:
-    """
-    连接生命周期管理器，跟踪和管理连接的创建、清理和监控
-    """
-    def __init__(self):
-        self.active_connections = set()
-        self.connection_stats = {
-            'created': 0,
-            'closed': 0,
-            'leaked': 0,
-            'errors': 0
-        }
-        self._lock = asyncio.Lock()
-
-    async def register_connection(self, connection_id: str):
-        """注册新连接"""
-        async with self._lock:
-            self.active_connections.add(connection_id)
-            self.connection_stats['created'] += 1
-            logger.debug(f"Registered connection: {connection_id}")
-
-    async def unregister_connection(self, connection_id: str):
-        """注销连接"""
-        async with self._lock:
-            if connection_id in self.active_connections:
-                self.active_connections.remove(connection_id)
-                self.connection_stats['closed'] += 1
-                logger.debug(f"Unregistered connection: {connection_id}")
-
-    async def cleanup_leaked_connections(self):
-        """清理可能泄漏的连接"""
-        async with self._lock:
-            # 标记所有当前连接为潜在泄漏
-            leaked_count = len(self.active_connections)
-            if leaked_count > 0:
-                logger.warning(f"Detected {leaked_count} potentially leaked connections")
-                self.connection_stats['leaked'] += leaked_count
-                self.active_connections.clear()
-
-    def get_stats(self) -> Dict[str, int]:
-        """获取连接统计信息"""
-        return self.connection_stats.copy()
-
-    def get_active_count(self) -> int:
-        """获取当前活跃连接数"""
-        return len(self.active_connections)
-
-# 安全的GenAI请求包装器
-async def safe_genai_request(
-    client: genai.Client,
-    request_func: callable,
-    timeout_manager: TimeoutManager,
-    connection_manager: ConnectionLifecycleManager,
-    connection_id: str,
-    has_tools: bool = False,
-    is_stream: bool = False,
-    **kwargs
-) -> Any:
-    """
-    安全的GenAI请求包装器，确保连接正确管理
-    支持普通协程和异步生成器
-    """
-    try:
-        # 注册连接
-        await connection_manager.register_connection(connection_id)
-
-        # 获取适当的超时时间
-        timeout = timeout_manager.get_timeout(has_tools, is_stream)
-
-        # 执行请求 - 检测是否为异步生成器
-        async with asyncio.timeout(timeout):
-            result = request_func(client, **kwargs)
-
-            # 检查是否为异步生成器
-            if hasattr(result, '__aiter__') and hasattr(result, '__anext__'):
-                # 异步生成器：直接返回，不使用await
-                # 注意：异步生成器的生命周期管理需要在调用方处理
-                return result
-            else:
-                # 普通协程：使用await执行
-                result = await result
-
-        # 对于非流式请求，成功完成时注销连接
-        # 对于流式请求，连接将在生成器耗尽时由调用方注销
-        if not is_stream:
-            await connection_manager.unregister_connection(connection_id)
-
-        return result
-
-    except asyncio.TimeoutError:
-        logger.warning(f"Request timeout for connection {connection_id}")
-        await connection_manager.unregister_connection(connection_id)
-        raise HTTPException(status_code=504, detail="Request timeout")
-
-    except Exception as e:
-        logger.error(f"Request error for connection {connection_id}: {str(e)}")
-        connection_manager.connection_stats['errors'] += 1
-        await connection_manager.unregister_connection(connection_id)
-        raise
-
-
-# 专门的流式请求包装器
-async def safe_stream_request(
-    client: genai.Client,
-    request_func: callable,
-    connection_manager: ConnectionLifecycleManager,
-    connection_id: str,
-    **kwargs
-) -> AsyncGenerator[bytes, None]:
-    """
-    专门用于流式请求的包装器，确保正确处理异步生成器
-    """
-    try:
-        # 注册连接
-        await connection_manager.register_connection(connection_id)
-
-        # 执行流式请求函数
-        stream_generator = request_func(client, **kwargs)
-
-        # 检查是否为异步生成器
-        if hasattr(stream_generator, '__aiter__') and hasattr(stream_generator, '__anext__'):
-            # 异步生成器：直接返回，不使用await
-            async for chunk in stream_generator:
-                yield chunk
-        else:
-            # 如果意外返回普通协程，抛出异常
-            raise Exception("Stream request function must return an async generator")
-
-    except Exception as e:
-        logger.error(f"Stream request error for connection {connection_id}: {str(e)}")
-        connection_manager.connection_stats['errors'] += 1
-        await connection_manager.unregister_connection(connection_id)
-        raise
-    finally:
-        # 流式请求完成后注销连接
-        await connection_manager.unregister_connection(connection_id)
-
-# 全局管理器实例
-timeout_manager = TimeoutManager()
-connection_manager = ConnectionLifecycleManager()
 
 # 配置日志
 logging.basicConfig(
@@ -229,6 +55,50 @@ def get_cached_client(api_key: str) -> genai.Client:
         client = genai.Client(api_key=api_key)
         _client_cache[api_key] = client
     return client
+
+
+# --- 加解密函数 ---
+def encrypt(text: str) -> str:
+    """
+    对文本进行加密
+    """
+    encrypted_parts = []
+    for char in text:
+        cp = ord(char)
+        hex_cp = f'{cp:08x}'
+        
+        new_hex_parts = []
+        for i in range(0, 8, 2):
+            byte = int(hex_cp[i:i+2], 16)
+            xor_byte = byte ^ 0x5A
+            new_hex_parts.append(f'{xor_byte:02x}')
+        
+        encrypted_parts.append("".join(new_hex_parts))
+        
+    return "".join(encrypted_parts)
+
+def decrypt(cipher_text: str) -> str:
+    """
+    对密文进行解密
+    """
+    decrypted_text = ""
+    if len(cipher_text) % 8 != 0:
+        raise ValueError("Invalid cipher text length")
+        
+    for i in range(0, len(cipher_text), 8):
+        group = cipher_text[i:i+8]
+        
+        hex_parts = []
+        for j in range(0, 8, 2):
+            byte = int(group[j:j+2], 16)
+            xor_byte = byte ^ 0x5A
+            hex_parts.append(f'{xor_byte:02x}')
+            
+        hex_cp = "".join(hex_parts)
+        cp = int(hex_cp, 16)
+        decrypted_text += chr(cp)
+        
+    return decrypted_text
 
 # 防自动化检测注入器
 class GeminiAntiDetectionInjector:
@@ -524,6 +394,13 @@ class ChatCompletionRequest(BaseModel):
 
         super().__init__(**data)
 
+# --- 加解密模型 ---
+class EncryptRequest(BaseModel):
+    text: str
+
+class DecryptRequest(BaseModel):
+    cipher: str
+
 # 内存缓存用于RPM/TPM限制
 class RateLimitCache:
     def __init__(self, max_entries: int = 10000):
@@ -586,34 +463,21 @@ class RateLimitCache:
 async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, Any]:
     """使用 google-genai SDK 检测单个 Gemini Key 的健康状态"""
     start_time = time.time()
-    connection_id = f"health_check_{uuid.uuid4().hex[:8]}"
-
     try:
         # 复用缓存客户端，避免频繁创建导致 AFC 日志刷屏
         client = get_cached_client(api_key)
-
-        # 使用安全的请求包装器
-        async def health_check_request(client):
-            return await client.aio.models.generate_content(
+        # SDK 默认 httpx 超时较高，这里通过 asyncio.wait_for 施加整体超时
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents="Hello",
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                 )
-            )
-
-        # 执行健康检查请求
-        response = await safe_genai_request(
-            client=client,
-            request_func=health_check_request,
-            timeout_manager=timeout_manager,
-            connection_manager=connection_manager,
-            connection_id=connection_id,
-            has_tools=False,
-            is_stream=False
+            ),
+            timeout=timeout
         )
-
         response_time = time.time() - start_time
         # 成功调用即视为健康
         return {
@@ -623,8 +487,6 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
             "error": None
         }
     except asyncio.TimeoutError:
-        response_time = time.time() - start_time
-        # 连接已在safe_genai_request中清理，这里只需要返回结果
         return {
             "healthy": False,
             "response_time": timeout,
@@ -632,11 +494,9 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
             "error": "Timeout"
         }
     except Exception as e:
-        response_time = time.time() - start_time
-        # 连接已在safe_genai_request中清理
         return {
             "healthy": False,
-            "response_time": response_time,
+            "response_time": time.time() - start_time,
             "status_code": None,
             "error": str(e)
         }
@@ -668,6 +528,38 @@ async def keep_alive_ping():
                     logger.warning(f"🟡 Keep-alive ping warning: {response.status}")
     except Exception as e:
         logger.warning(f"🔴 Keep-alive ping failed: {e}")
+
+
+# 每小时健康检测函数
+async def record_hourly_health_check():
+    """每小时记录一次健康检测结果"""
+    try:
+        available_keys = db.get_available_gemini_keys()
+
+        for key_info in available_keys:
+            key_id = key_info['id']
+
+            # 执行健康检测
+            health_result = await check_gemini_key_health(key_info['key'])
+
+            # 记录到历史表
+            db.record_daily_health_status(
+                key_id,
+                health_result['healthy'],
+                health_result['response_time']
+            )
+
+            # 更新性能指标
+            db.update_key_performance(
+                key_id,
+                health_result['healthy'],
+                health_result['response_time']
+            )
+
+        logger.info(f"✅ Hourly health check completed for {len(available_keys)} keys")
+
+    except Exception as e:
+        logger.error(f"❌ Hourly health check failed: {e}")
 
 
 # 自动清理函数
@@ -708,7 +600,7 @@ async def update_key_performance_background(key_id: int, success: bool, response
 
         # 如果失败，启动后台健康检测任务
         if not success:
-            await schedule_health_check(key_id)
+            asyncio.create_task(schedule_health_check(key_id))
 
     except Exception as e:
         logger.error(f"Background performance update failed for key {key_id}: {e}")
@@ -770,226 +662,199 @@ async def collect_gemini_response_directly(
         use_stream: bool = True
 ) -> Dict:
     """
-    从Google API收集完整响应（重构版，使用安全请求包装器）
+    从Google API收集完整响应
     """
-    connection_id = f"collect_direct_{uuid.uuid4().hex[:8]}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
+    
+    # 确定超时时间
+    has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
+    is_fast_failover = await should_use_fast_failover()
+    if has_tool_calls:
+        timeout = 60.0
+    elif is_fast_failover:
+        timeout = 60.0
+    else:
+        timeout = float(db.get_config('request_timeout', '60'))
+
+    logger.info(f"Starting direct collection from: {url}")
+    
+    complete_content = ""
+    thinking_content = ""
+    total_tokens = 0
+    finish_reason = "stop"
+    processed_lines = 0
+
+    # 防截断相关变量
+    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+    full_response = ""
+    saw_finish_tag = False
+    start_time = time.time()
 
     try:
-        # 获取客户端
         client = get_cached_client(gemini_key)
+        if use_stream:
+            # 使用 google-genai 的流式接口，并在每个 chunk 间重置超时计时
+            genai_stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=gemini_request["contents"],
+                config=gemini_request.get("generation_config")
+            )
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(genai_stream.__anext__(), timeout)
+                except StopAsyncIteration:
+                    break
+                # chunk.candidates 列表结构与 REST 回包保持一致
+                # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
+                data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
+                for candidate in data.get("candidates", []):
+                    content_data = candidate.get("content", {})
+                    parts = content_data.get("parts", [])
+                    for part in parts:
+                        text = part.get("text", "")
+                        if not text:
+                            continue
+                        total_tokens += len(text.split())
+                        is_thought = part.get("thought", False)
+                        include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
+                        if is_thought and not include_thoughts:
+                            # 仅记录思考，不直接输出
+                            thinking_content += text
+                        else:
+                            if is_thought and not thinking_content and not complete_content:
+                                complete_content += "**Thinking Process:**\n"
+                            elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
+                                complete_content += "\n\n**Response:**\n"
+                            complete_content += text
+                    finish_reason_raw = candidate.get("finishReason", "stop")
+                    finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
 
-        # 确定是否需要流式请求
-        has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
-        is_fast_failover = await should_use_fast_failover()
+                    processed_lines += 1
 
-        complete_content = ""
-        thinking_content = ""
-        total_tokens = 0
-        finish_reason = "stop"
-        processed_lines = 0
-
-        # 防截断相关变量
-        anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-        full_response = ""
-        saw_finish_tag = False
-        start_time = time.time()
-
-        if use_stream and not has_tool_calls:
-            # 使用流式接口
-            async def stream_request(client):
-                genai_stream = await client.aio.models.generate_content_stream(
-                    model=model_name,
-                    contents=gemini_request["contents"],
-                    config=gemini_request.get("generation_config")
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, True, response_time)
                 )
 
-                async for chunk in genai_stream:
-                    # chunk.candidates 列表结构与 REST 回包保持一致
-                    # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
-                    data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
-                    for candidate in data.get("candidates", []):
-                        content_data = candidate.get("content", {})
-                        parts = content_data.get("parts", [])
-                        for part in parts:
-                            text = part.get("text", "")
-                            if not text:
-                                continue
-                            nonlocal total_tokens, thinking_content, complete_content
-                            total_tokens += len(text.split())
-                            is_thought = part.get("thought", False)
-                            include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-                            if is_thought and not include_thoughts:
-                                # 仅记录思考，不直接输出
-                                thinking_content += text
-                            else:
-                                if is_thought and not thinking_content and not complete_content:
-                                    complete_content += "**Thinking Process:**\n"
-                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                    complete_content += "\n\n**Response:**\n"
-                                complete_content += text
-                        finish_reason_raw = candidate.get("finishReason", "stop")
-                        nonlocal finish_reason
-                        finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
+    except asyncio.TimeoutError as e:
+        logger.warning(f"Direct request timeout/connection error: {str(e)}")
+        response_time = time.time() - start_time
+        asyncio.create_task(
+            update_key_performance_background(key_id, False, response_time)
+        )
+        raise Exception(f"Direct request failed: {str(e)}")
 
-                        nonlocal processed_lines
-                        processed_lines += 1
+    except Exception as e:
+        logger.error(f"Unexpected direct request error: {str(e)}")
+        response_time = time.time() - start_time
+        asyncio.create_task(
+            update_key_performance_background(key_id, False, response_time)
+        )
+        raise
 
-                    response_time = time.time() - start_time
-                    asyncio.create_task(
-                        update_key_performance_background(key_id, True, response_time)
-                    )
-
-                return {
-                    "complete_content": complete_content,
-                    "thinking_content": thinking_content,
-                    "total_tokens": total_tokens,
-                    "finish_reason": finish_reason,
-                    "processed_lines": processed_lines
-                }
-
-            # 执行流式请求
-            stream_result = await safe_genai_request(
-                client=client,
-                request_func=stream_request,
-                timeout_manager=timeout_manager,
-                connection_manager=connection_manager,
-                connection_id=connection_id,
-                has_tools=has_tool_calls,
-                is_stream=True
-            )
-
-            complete_content = stream_result["complete_content"]
-            thinking_content = stream_result["thinking_content"]
-            total_tokens = stream_result["total_tokens"]
-            finish_reason = stream_result["finish_reason"]
-
-        else:
-            # 使用非流式接口
-            async def non_stream_request(client):
+    else:
+            # 非流式直接调用
+            try:
                 response_obj = await client.aio.models.generate_content(
                     model=model_name,
                     contents=gemini_request["contents"],
                     config=gemini_request.get("generation_config")
                 )
                 data = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
-
-                complete_content = ""
-                thinking_content = ""
-                total_tokens = 0
-                finish_reason = "stop"
-
                 for candidate in data.get("candidates", []):
                     finish_reason_raw = candidate.get("finishReason", "stop")
                     finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
                     for part in candidate.get("content", {}).get("parts", []):
                         text = part.get("text", "")
                         if text:
-                            is_thought = part.get("thought", False)
-                            include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-                            if is_thought and not include_thoughts:
-                                thinking_content += text
-                            else:
-                                if is_thought and not thinking_content and not complete_content:
-                                    complete_content += "**Thinking Process:**\n"
-                                elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                    complete_content += "\n\n**Response:**\n"
-                                complete_content += text
+                            complete_content += text
                             total_tokens += len(text.split())
-
-                return {
-                    "complete_content": complete_content,
-                    "thinking_content": thinking_content,
-                    "total_tokens": total_tokens,
-                    "finish_reason": finish_reason
-                }
-
-            # 执行非流式请求
-            non_stream_result = await safe_genai_request(
-                client=client,
-                request_func=non_stream_request,
-                timeout_manager=timeout_manager,
-                connection_manager=connection_manager,
-                connection_id=connection_id,
-                has_tools=has_tool_calls,
-                is_stream=False
-            )
-
-            complete_content = non_stream_result["complete_content"]
-            thinking_content = non_stream_result["thinking_content"]
-            total_tokens = non_stream_result["total_tokens"]
-            finish_reason = non_stream_result["finish_reason"]
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, True, response_time)
+                )
+            except Exception as e:
+                response_time = time.time() - start_time
+                asyncio.create_task(
+                    update_key_performance_background(key_id, False, response_time)
+                )
+                raise
 
         # 检查是否收集到内容
-        if not complete_content.strip():
-            logger.error(f"No content collected directly. Connection: {connection_id}")
-            raise HTTPException(
-                status_code=502,
-                detail="No content received from Google API"
-            )
+    if not complete_content.strip():
+        logger.error(f"No content collected directly. Processed {processed_lines} lines")
+        raise HTTPException(
+            status_code=502,
+            detail="No content received from Google API"
+        )
 
-        # Anti-truncation handling
-        anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-        if anti_trunc_cfg.get('enabled'):
-            complete_content = AntiTruncation.process_response_with_anti_truncation(complete_content)
-
-        # Anti-censorship handling
-        anti_censorship_cfg = await get_anti_censorship_config()
-        if anti_censorship_cfg:
-            logger.info(f"🔓 Anti-censorship enabled for non-streaming response, processing content (length: {len(complete_content)})")
-            original_content = complete_content
+    # Anti-truncation handling for non-stream response
+    anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
+    if anti_trunc_cfg.get('enabled'):
+        max_attempts = anti_trunc_cfg.get('max_attempts', 3)
+        attempt = 0
+        while True:
+            trimmed = complete_content.rstrip()
+            if trimmed.endswith('[finish]'):
+                complete_content = trimmed[:-8].rstrip()
+                break
+            if attempt >= max_attempts:
+                logger.info("Anti-truncation enabled but reached max attempts without [finish].")
+                break
+            attempt += 1
+            logger.info(f"Anti-truncation attempt {attempt}: continue fetching content")
+            # 构造新的请求，在末尾追加继续提示
+            continuation_request = copy.deepcopy(gemini_request)
+            continuation_request['contents'].append({
+                "role": "user",
+                "parts": [{
+                    "text": "继续，请以 [finish] 结尾"
+                }]
+            })
             try:
-                start_time = time.time()
-                complete_content = TextCrypto.auto_decrypt_response(complete_content)
-                decrypt_time = time.time() - start_time
-
-                # 检测内容是否发生变化
-                content_changed = original_content != complete_content
-                original_preview = original_content[:100] + "..." if len(original_content) > 100 else original_content
-                decrypted_preview = complete_content[:100] + "..." if len(complete_content) > 100 else complete_content
-
-                if content_changed:
-                    logger.info(f"✅ Anti-censorship decryption successful - content changed (time: {decrypt_time:.3f}s)")
-                    logger.debug(f"📝 Original: '{original_preview}' -> Decrypted: '{decrypted_preview}'")
-                else:
-                    logger.info(f"ℹ️ Anti-censorship decryption completed - no changes detected (time: {decrypt_time:.3f}s)")
-                    logger.debug(f"📝 Content unchanged: '{original_preview}'")
-
+                cont_response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=continuation_request["contents"],
+                    config=continuation_request.get("generation_config")
+                )
+                data = cont_response.to_dict() if hasattr(cont_response, "to_dict") else json.loads(cont_response.model_dump_json())
+                for candidate in data.get("candidates", []):
+                    for part in candidate.get("content", {}).get("parts", []):
+                        text = part.get("text", "")
+                        if text:
+                            complete_content += text
+                            total_tokens += len(text.split())
             except Exception as e:
-                logger.error(f"❌ Anti-censorship decryption failed: {str(e)}, continuing with original content")
-                logger.debug(f"Error details", exc_info=True)
-                # 解密失败时保持原始内容
+                logger.warning(f"Anti-truncation continuation attempt failed: {e}")
+                break
 
-        # 计算token使用量
-        prompt_tokens = len(str(openai_request.messages).split())
-        completion_tokens = len(complete_content.split())
+    # 计算token使用量
+    prompt_tokens = len(str(openai_request.messages).split())
+    completion_tokens = len(complete_content.split())
 
-        # 构建最终响应
-        openai_response = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": openai_request.model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": complete_content.strip()
-                },
-                "finish_reason": finish_reason
-            }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens
-            }
+    # 构建最终响应
+    openai_response = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": openai_request.model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": complete_content.strip()
+            },
+            "finish_reason": finish_reason
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
         }
+    }
 
-        logger.info(f"Successfully collected direct response: {len(complete_content)} chars, {completion_tokens} tokens, connection: {connection_id}")
-        return openai_response
-
-    except Exception as e:
-        logger.error(f"Failed to collect direct response, connection: {connection_id}: {str(e)}")
-        raise
+    logger.info(f"Successfully collected direct response: {len(complete_content)} chars, {completion_tokens} tokens")
+    return openai_response
 
 
 async def make_gemini_request_single_attempt(
@@ -999,33 +864,16 @@ async def make_gemini_request_single_attempt(
         model_name: str,
         timeout: float = 60.0
 ) -> Dict:
-    """
-    单次请求尝试，使用安全的请求包装器确保连接正确管理
-    """
     start_time = time.time()
-    connection_id = f"single_attempt_{uuid.uuid4().hex[:8]}"
 
     try:
         client = get_cached_client(gemini_key)
-
-        # 使用安全的请求包装器
-        async def single_request(client):
-            return await client.aio.models.generate_content(
+        async with asyncio.timeout(timeout):
+            response_obj = await client.aio.models.generate_content(
                 model=model_name,
                 contents=gemini_request["contents"],
                 config=gemini_request["generation_config"]
             )
-
-        response_obj = await safe_genai_request(
-            client=client,
-            request_func=single_request,
-            timeout_manager=timeout_manager,
-            connection_manager=connection_manager,
-            connection_id=connection_id,
-            has_tools=False,
-            is_stream=False
-        )
-
         response_time = time.time() - start_time
         # SDK 对象转 dict
         response_dict = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
@@ -1034,22 +882,13 @@ async def make_gemini_request_single_attempt(
         )
         return response_dict
 
-    except HTTPException as e:
-        # 重新抛出HTTPException，因为safe_genai_request已经处理了超时和连接管理
+    except asyncio.TimeoutError:
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
         )
-
-        # 处理速率限制标记
-        err_msg = e.detail
-        if e.status_code == 429 or "rate_limit" in err_msg.lower() or "status: 429" in err_msg:
-            logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
-            db.update_gemini_key_status(key_id, 'rate_limited')
-        elif e.status_code >= 500:
-            logger.error(f"Key #{key_id} request error: {err_msg}")
-
-        raise
+        logger.warning(f"Key #{key_id} timeout after {response_time:.2f}s")
+        raise HTTPException(status_code=504, detail="Request timeout")
 
     except Exception as e:
         response_time = time.time() - start_time
@@ -1058,7 +897,11 @@ async def make_gemini_request_single_attempt(
         )
         # google-genai 会在异常中封装详细信息
         err_msg = str(e)
-        logger.error(f"Key #{key_id} unexpected request error: {err_msg}")
+        if "rate_limit" in err_msg.lower() or "status: 429" in err_msg:
+            logger.warning(f"Key #{key_id} is rate-limited (429). Marking as 'rate_limited'.")
+            db.update_gemini_key_status(key_id, 'rate_limited')
+            raise HTTPException(status_code=429, detail="Rate limited")
+        logger.error(f"Key #{key_id} request error: {err_msg}")
         raise HTTPException(status_code=500, detail=err_msg)
 
 
@@ -1233,35 +1076,45 @@ async def stream_gemini_response_single_attempt(
 ) -> AsyncGenerator[bytes, None]:
     """
     单次流式请求尝试，失败立即抛出异常，使用 google-genai SDK 实现
-    重构版：使用安全的请求包装器确保连接正确管理
     """
-    connection_id = f"stream_single_{uuid.uuid4().hex[:8]}"
-
-    # 确定是否需要工具调用
+    # 确定超时时间：工具调用或快速响应模式使用60秒，其他使用配置值
     has_tool_calls = bool(openai_request.tools or openai_request.tool_choice)
     is_fast_failover = await should_use_fast_failover()
+    if has_tool_calls:
+        timeout = 60.0  # 工具调用强制60秒超时
+        logger.info("Using extended 60s timeout for tool calls in streaming")
+    elif is_fast_failover:
+        timeout = 60.0  # 快速响应模式使用60秒超时
+        logger.info("Using extended 60s timeout for fast response mode in streaming")
+    else:
+        timeout = float(db.get_config('request_timeout', '60'))
 
-    logger.info(f"Starting single stream request to model: {model_name}, connection: {connection_id}")
+    logger.info(f"Starting single stream request to model: {model_name}")
 
     start_time = time.time()
 
     try:
         client = get_cached_client(gemini_key)
-
-        # 流式请求函数
-        async def stream_request(client, contents=None, config=None):
-            # 使用传递的参数，如果没有则使用默认值
-            stream_contents = contents if contents is not None else gemini_request["contents"]
-            stream_config = config if config is not None else gemini_request.get("generation_config")
-
+        async with asyncio.timeout(timeout):
+            contents = gemini_request["contents"]
             # 流式接口直接使用contents和body参数
             genai_stream = await client.aio.models.generate_content_stream(
                 model=model_name,
-                contents=stream_contents,
-                config=stream_config
+                contents=gemini_request["contents"],
+                config=gemini_request.get("generation_config")
             )
 
-            # 初始化流式响应变量
+            if False:  # legacy httpx code disabled after migration to google-genai
+                    response_time = time.time() - start_time
+                    asyncio.create_task(
+                        update_key_performance_background(key_id, False, response_time)
+                    )
+
+                    error_text = await response.aread()
+                    error_msg = error_text.decode() if error_text else f"HTTP {response.status_code}"
+                    logger.error(f"Stream request failed with status {response.status_code}: {error_msg}")
+                    raise Exception(f"Stream request failed: {error_msg}")
+
             stream_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
             created = int(time.time())
             total_tokens = 0
@@ -1270,7 +1123,6 @@ async def stream_gemini_response_single_attempt(
             processed_lines = 0
             # Anti-truncation related variables
             anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-            anti_censorship_cfg = await get_anti_censorship_config()
             full_response = ""
             saw_finish_tag = False
 
@@ -1298,22 +1150,6 @@ async def stream_gemini_response_single_attempt(
                                         text_to_send = text
                                 else:
                                     text_to_send = text
-                                
-                                # Anti-censorship handling for stream
-                                if anti_censorship_cfg:
-                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text_to_send)})")
-                                    original_chunk = text_to_send
-                                    try:
-                                        chunk_start_time = time.time()
-                                        text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
-                                        decrypt_time = time.time() - chunk_start_time
-                                        if original_chunk != text_to_send:
-                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
-                                        else:
-                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
-                                    except Exception as e:
-                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
-
                                 full_response += text_to_send
 
                                 is_thought = getattr(part, "thought", False)
@@ -1386,6 +1222,8 @@ async def stream_gemini_response_single_attempt(
                             await rate_limiter.add_usage(model_name, 1, total_tokens)
                             return
 
+
+
             # 如果正常结束但没有内容，抛出异常
             if not has_content:
                 logger.warning("Stream ended without content")
@@ -1417,20 +1255,12 @@ async def stream_gemini_response_single_attempt(
 
             await rate_limiter.add_usage(model_name, 1, total_tokens)
 
-        # 执行流式请求 - 使用专门的流式请求包装器
-        async for chunk in safe_stream_request(
-            client=client,
-            request_func=stream_request,
-            connection_manager=connection_manager,
-            connection_id=connection_id,
-            contents=gemini_request["contents"],
-            config=gemini_request.get("generation_config")
-        ):
-            yield chunk
 
 
+    # except Exception as e:  # 原 httpx 超时连接异常移除
+    # Legacy httpx branch disabled after migration to google-genai
     except Exception as e:
-        logger.warning(f"Stream timeout/connection error: {str(e)}, connection: {connection_id}")
+        logger.warning(f"Stream timeout/connection error: {str(e)}")
         response_time = time.time() - start_time
         asyncio.create_task(
             update_key_performance_background(key_id, False, response_time)
@@ -1810,6 +1640,13 @@ async def lifespan(app: FastAPI):
     # 初始化防检测系统
     init_anti_detection_config()
 
+    # 启动时执行一次健康检测
+    try:
+        logger.info("🔍 Performing initial health check for all API keys...")
+        await record_hourly_health_check()
+        logger.info("✅ Initial health check completed")
+    except Exception as e:
+        logger.error(f"❌ Initial health check failed: {e}")
 
     # 检查是否启用保活功能
     enable_keep_alive = os.getenv('ENABLE_KEEP_ALIVE', 'true').lower() == 'true'
@@ -1839,6 +1676,15 @@ async def lifespan(app: FastAPI):
                 max_instances=1
             )
 
+            # 每小时健康检测任务
+            scheduler.add_job(
+                record_hourly_health_check,
+                'interval',
+                hours=1,
+                id='hourly_health_check',
+                max_instances=1,
+                coalesce=True
+            )
 
             # 每天凌晨2点自动清理任务
             scheduler.add_job(
@@ -1998,17 +1844,36 @@ def get_actual_model_name(request_model: str) -> str:
 
     default_model = db.get_config('default_model_name', 'gemini-2.5-flash-lite')
     logger.info(f"Unsupported model: {request_model}, using default: {default_model}")
-async def get_anti_censorship_config() -> bool:
-    """获取防审查配置"""
-    return db.get_config('anti_censorship_enabled', 'false').lower() == 'true'
+    return default_model
 
 
-async def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
+def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     """向消息中注入prompt"""
+    new_messages = messages.copy()
+    
+    # 端到端加密注入
+    e2e_config = db.get_e2e_encryption_config()
+    if e2e_config.get('enabled'):
+        encryption_prompt = (
+            "【加密指令】\n"
+            "你接下来要说的话，必须先用以下算法转成密文再输出：\n"
+            "1. 把每个字符按 UTF-32BE 编码为 8 位十六进制（大端，无 0x，补零）。\n"
+            "2. 对该十六进制字符串逐字节与 0x5A 异或。\n"
+            "3. 把异或后的 8 位十六进制串直接连在一起输出，不要空格或其他符号。"
+        )
+        # 注入到最后一个用户消息的末尾
+        for i in range(len(new_messages) - 1, -1, -1):
+            if new_messages[i].role == 'user':
+                original_content = new_messages[i].get_text_content()
+                new_content = f"{original_content}\n\n{encryption_prompt}"
+                new_messages[i] = ChatMessage(role='user', content=new_content)
+                break
+
+    # 常规Prompt注入
     inject_config = db.get_inject_prompt_config()
 
     if not inject_config['enabled'] or not inject_config['content']:
-        return messages
+        return new_messages
 
     content = inject_config['content']
     position = inject_config['position']
@@ -2046,28 +1911,13 @@ async def inject_prompt_to_messages(messages: List[ChatMessage]) -> List[ChatMes
     # Anti-truncation prompt injection
     anti_truncation_cfg = db.get_anti_truncation_config()
     if anti_truncation_cfg.get('enabled'):
-        new_messages = AntiTruncation.inject_continuation_prompt(new_messages)
-
-    # Anti-censorship prompt injection
-    anti_censorship_cfg = await get_anti_censorship_config()
-    if anti_censorship_cfg:
-        # Inject anti-censorship prompt to the last user message
         for i in range(len(new_messages) - 1, -1, -1):
             if new_messages[i].role == 'user':
-                content = new_messages[i].content
-                anti_censorship_prompt = AntiTruncation.get_anti_censorship_prompt()
-                if isinstance(content, str):
-                    new_messages[i] = ChatMessage(
-                        role='user', 
-                        content=f"{anti_censorship_prompt}\n\n{content}"
-                    )
-                elif isinstance(content, list):
-                    # Create new content list with anti-censorship prompt at the beginning
-                    new_content = [{"type": "text", "text": anti_censorship_prompt}] + content
-                    new_messages[i] = ChatMessage(
-                        role='user',
-                        content=new_content
-                    )
+                suffix = "请以 [finish] 结尾"
+                if isinstance(new_messages[i].content, str):
+                    new_messages[i] = ChatMessage(role='user', content=f"{new_messages[i].content}\n\n{suffix}")
+                elif isinstance(new_messages[i].content, list):
+                    new_messages[i].content.append(suffix)
                 break
 
     return new_messages
@@ -2351,6 +2201,14 @@ def gemini_to_openai(gemini_response: Dict, request: ChatCompletionRequest, usag
 
     include_thoughts = request.thinking_config and request.thinking_config.include_thoughts
     thoughts, content = extract_thoughts_and_content(gemini_response, include_thoughts)
+
+    # 自动解密
+    e2e_config = db.get_e2e_encryption_config()
+    if e2e_config.get('enabled'):
+        try:
+            content = decrypt(content.strip())
+        except Exception as e:
+            logger.warning(f"Failed to decrypt content: {e}. Returning original content.")
 
     for i, candidate in enumerate(gemini_response.get("candidates", [])):
         message_content = content if content else ""
@@ -2999,32 +2857,7 @@ async def stream_gemini_response(
                                                         text_to_send = text
                                                 else:
                                                     text_to_send = text
-
                                                 full_response += text_to_send
-
-                                                # Anti-censorship handling for stream
-                                                anti_censorship_cfg = await get_anti_censorship_config()
-                                                if anti_censorship_cfg:
-                                                    logger.debug(f"🔓 Anti-censorship enabled for streaming chunk (length: {len(text)})")
-                                                    original_chunk = text_to_send
-                                                    try:
-                                                        start_time = time.time()
-                                                        text_to_send = TextCrypto.auto_decrypt_response(text_to_send)
-                                                        decrypt_time = time.time() - start_time
-
-                                                        # 检测内容是否发生变化
-                                                        chunk_changed = original_chunk != text_to_send
-
-                                                        if chunk_changed:
-                                                            logger.debug(f"✅ Streaming chunk decrypted successfully (time: {decrypt_time:.3f}s)")
-                                                            logger.debug(f"📝 Chunk changed: '{original_chunk[:50]}...' -> '{text_to_send[:50]}...'")
-                                                        else:
-                                                            logger.debug(f"ℹ️ Streaming chunk unchanged (time: {decrypt_time:.3f}s)")
-
-                                                    except Exception as e:
-                                                        logger.warning(f"❌ Streaming chunk decryption failed: {str(e)}, using original")
-                                                        logger.debug(f"Error details", exc_info=True)
-                                                        # 解密失败时保持原始内容
 
                                                 is_thought = part.get("thought", False)
 
@@ -3752,7 +3585,7 @@ async def chat_completions(
             )
 
         actual_model_name = get_actual_model_name(request.model)
-        request.messages = await inject_prompt_to_messages(request.messages)
+        request.messages = inject_prompt_to_messages(request.messages)
 
         # 使用增强版的转换函数，包含防检测功能
         gemini_request = openai_to_gemini(request, enable_anti_detection=True)
@@ -4176,6 +4009,46 @@ async def get_failover_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 加密解密端点
+@app.post("/admin/crypto/encrypt", summary="加密文本", tags=["管理 API：工具"])
+async def encrypt_text(request: EncryptRequest):
+    """
+    **加密文本**
+
+    使用项目指定的算法加密一段文本。
+    """
+    try:
+        encrypted_text = encrypt(request.text)
+        return {
+            "success": True,
+            "original_text": request.text,
+            "encrypted_text": encrypted_text
+        }
+    except Exception as e:
+        logger.error(f"Encryption failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/crypto/decrypt", summary="解密文本", tags=["管理 API：工具"])
+async def decrypt_text(request: DecryptRequest):
+    """
+    **解密文本**
+
+    使用项目指定的算法解密一段密文。
+    """
+    try:
+        decrypted_text = decrypt(request.cipher)
+        return {
+            "success": True,
+            "cipher_text": request.cipher,
+            "decrypted_text": decrypted_text
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Decryption failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # 防检测管理端点
 @app.post("/admin/config/anti-detection", summary="更新防检测配置", tags=["管理 API：配置"])
 async def update_anti_detection_config(request: dict):
@@ -4328,42 +4201,47 @@ async def get_anti_truncation_config():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/admin/config/anti-censorship", summary="更新防审查配置", tags=["管理 API：配置"])
-async def update_anti_censorship_config(request: dict):
+# 端到端加密管理端点
+@app.post("/admin/config/e2e-encryption", summary="更新端到端加密配置", tags=["管理 API：配置"])
+async def update_e2e_encryption_config(request: dict):
     """
-    **更新防审查配置**
+    **更新端到端加密配置**
 
-    修改防审查功能的状态。
+    修改端到端加密功能的状态。
     - **enabled**: `true` 或 `false`
     """
     try:
         enabled = request.get('enabled')
         if enabled is None:
             raise HTTPException(status_code=422, detail="Parameter 'enabled' is required")
-        if db.set_config('anti_censorship_enabled', 'true' if enabled else 'false'):
-            logger.info(f"Anti-censorship enabled: {enabled}")
-            return {"success": True, "message": "Anti-censorship configuration updated successfully", "anti_censorship_enabled": enabled}
+        
+        if db.set_e2e_encryption_config(enabled=enabled):
+            logger.info(f"E2E Encryption enabled: {enabled}")
+            return {
+                "success": True,
+                "message": "E2E encryption configuration updated successfully",
+                "e2e_encryption_enabled": enabled
+            }
         else:
-            raise HTTPException(status_code=500, detail="Failed to update anti-censorship configuration")
+            raise HTTPException(status_code=500, detail="Failed to update E2E encryption configuration")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update anti-censorship config: {str(e)}")
+        logger.error(f"Failed to update E2E encryption config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/admin/config/anti-censorship", summary="获取防审查配置", tags=["管理 API：配置"])
-async def get_anti_censorship_config():
+@app.get("/admin/config/e2e-encryption", summary="获取端到端加密配置", tags=["管理 API：配置"])
+async def get_e2e_encryption_config():
     """
-    **获取防审查配置**
+    **获取端到端加密配置**
 
-    返回防审查功能的当前状态。
+    返回端到端加密功能的当前状态。
     """
     try:
-        enabled = db.get_config('anti_censorship_enabled', 'false').lower() == 'true'
-        return {"success": True, "anti_censorship_enabled": enabled}
+        config = db.get_e2e_encryption_config()
+        return {"success": True, **config}
     except Exception as e:
-        logger.error(f"Failed to get anti-censorship config: {str(e)}")
+        logger.error(f"Failed to get E2E encryption config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 保活管理端点
@@ -4411,6 +4289,15 @@ async def toggle_keep_alive():
                 max_instances=1
             )
 
+            # 重新添加健康检测和自动清理任务
+            scheduler.add_job(
+                record_hourly_health_check,
+                'interval',
+                hours=1,
+                id='hourly_health_check',
+                max_instances=1,
+                coalesce=True
+            )
 
             scheduler.add_job(
                 auto_cleanup_failed_keys,
