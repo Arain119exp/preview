@@ -765,7 +765,7 @@ async def get_admin_stats(
         "healthy_gemini_keys": health_summary.get('healthy', 0),
         "total_user_keys": len(db.get_all_user_keys()),
         "database_size_mb": os.path.getsize(db.db_path) / 1024 / 1024 if os.path.exists(db.db_path) else 0,
-        "usage_stats": db.get_usage_stats(),
+        "usage_stats": db.get_all_usage_stats(),
         "failover_config": db.get_failover_config()
     }
 
