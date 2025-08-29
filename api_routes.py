@@ -515,6 +515,42 @@ async def get_all_config_endpoint(db: Database = Depends(get_db)):
         "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
     }
 
+@admin_router.post("/config/thinking", summary="更新思考模式配置")
+async def update_thinking_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_thinking_config(
+        enabled=request.get('enabled'),
+        budget=request.get('budget'),
+        include_thoughts=request.get('include_thoughts')
+    )
+    return {"success": True, "message": "Config updated"}
+
+@admin_router.post("/config/inject-prompt", summary="更新提示词注入配置")
+async def update_inject_prompt_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_inject_prompt_config(
+        enabled=request.get('enabled'),
+        content=request.get('content'),
+        position=request.get('position')
+    )
+    return {"success": True, "message": "Config updated"}
+
+@admin_router.post("/config/stream-mode", summary="更新流式模式配置")
+async def update_stream_mode_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_stream_mode_config(mode=request.get('mode'))
+    return {"success": True, "message": "Config updated"}
+
+@admin_router.post("/config/stream-to-gemini-mode", summary="更新向 Gemini 流式模式配置")
+async def update_stream_to_gemini_mode_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_stream_to_gemini_mode_config(mode=request.get("mode"))
+    return {"success": True, "message": "Config updated"}
+
+@admin_router.post("/config/load-balance", summary="更新负载均衡策略")
+async def update_load_balance_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    strategy = request.get('load_balance_strategy')
+    if strategy not in ['adaptive', 'least_used', 'round_robin']:
+        raise HTTPException(422, "Invalid load balance strategy")
+    db.set_config('load_balance_strategy', strategy)
+    return {"success": True, "message": "Config updated"}
+
 @admin_router.get("/stats", summary="获取管理统计信息")
 async def get_admin_stats_endpoint(db: Database = Depends(get_db), anti_detection: GeminiAntiDetectionInjector = Depends(get_anti_detection), keep_alive_enabled: bool = Depends(get_keep_alive_enabled)):
     health_summary = db.get_keys_health_summary()
