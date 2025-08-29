@@ -338,12 +338,12 @@ async def chat_completions(
         should_stream = False
 
     if should_stream:
-        if await should_use_fast_failover():
+        if await should_use_fast_failover(db):
             return StreamingResponse(stream_with_fast_failover(gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
         else:
             return StreamingResponse(stream_with_failover(gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
     else:
-        if await should_use_fast_failover():
+        if await should_use_fast_failover(db):
             response = await make_request_with_fast_failover(gemini_request, request, actual_model_name, user_key_info)
         else:
             response = await make_request_with_failover(gemini_request, request, actual_model_name, user_key_info)
