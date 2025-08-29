@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import Database
-from api_routes import router as api_router
+from api_routes import router as api_router, admin_router
 from dependencies import get_db, get_start_time, get_request_count, get_keep_alive_enabled, get_anti_detection
 from api_utils import GeminiAntiDetectionInjector, keep_alive_ping
 from api_services import record_hourly_health_check, auto_cleanup_failed_keys
@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 request_count = 0
 start_time = time.time()
 scheduler = None
-keep_alive_enabled = os.getenv('ENABLE_KEEP_ALIVE', 'false').lower() == 'true'
+# In Render environment, default to 'true', otherwise default to 'false'
+default_keep_alive = 'true' if os.getenv('RENDER') else 'false'
+keep_alive_enabled = os.getenv('ENABLE_KEEP_ALIVE', default_keep_alive).lower() == 'true'
 
 # Initialize database and anti-detection injector
 db = Database()
@@ -98,6 +100,7 @@ app.add_middleware(
 
 # Include API router
 app.include_router(api_router)
+app.include_router(admin_router)
 
 # Dependency overrides
 def _get_db():
