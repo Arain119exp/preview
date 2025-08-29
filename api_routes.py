@@ -26,6 +26,7 @@ from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
                        inject_prompt_to_messages, openai_to_gemini,
                        upload_file_to_gemini, validate_file_for_gemini)
 from database import Database
+from app_utils import auto_cleanup_failed_keys
 from dependencies import (get_anti_detection, get_db, get_keep_alive_enabled,
                           get_request_count, get_start_time)
 
@@ -383,6 +384,54 @@ async def update_cleanup_config(request: dict, db: Database = Depends(get_db)):
     )
     return {"success": True, "message": "Config updated"}
 
+@admin_router.post("/cleanup/manual", summary="手动执行清理")
+async def manual_cleanup(db: Database = Depends(get_db)):
+    try:
+        await auto_cleanup_failed_keys(db)
+        return {"success": True, "message": "Manual cleanup executed successfully"}
+    except Exception as e:
+        logger.error(f"Manual cleanup failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.get("/failover/stats", summary="获取故障转移统计")
+async def get_failover_stats(db: Database = Depends(get_db)):
+    try:
+        health_summary = db.get_keys_health_summary()
+        return {
+            "success": True,
+            "health_summary": health_summary,
+            "config": db.get_failover_config(),
+            "recommendations": {
+                "optimal_max_attempts": min(max(health_summary.get('healthy', 0), 2), 5),
+                "fast_failover_recommended": health_summary.get('unhealthy', 0) > 0,
+                "background_check_recommended": True
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get failover stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.post("/test/anti-detection", summary="测试防检测功能")
+async def test_anti_detection(anti_detection: GeminiAntiDetectionInjector = Depends(get_anti_detection)):
+    try:
+        test_texts = [ "请帮我分析这个问题", "使用中文回复：", "请告诉我", "我想说：" ]
+        results = []
+        for text in test_texts:
+            processed = anti_detection.inject_symbols(text)
+            results.append({
+                "original": text,
+                "processed": processed,
+                "char_difference": len(processed) - len(text)
+            })
+        return {
+            "success": True,
+            "results": results,
+            "total_symbols_available": len(anti_detection.safe_symbols)
+        }
+    except Exception as e:
+        logger.error(f"Anti-detection test failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @admin_router.get("/config/failover", summary="获取故障转移配置")
 async def get_failover_config_endpoint(db: Database = Depends(get_db)):
     return {"success": True, "config": db.get_failover_config()}
@@ -430,6 +479,21 @@ async def get_response_decryption_config_endpoint(db: Database = Depends(get_db)
 async def update_response_decryption_config_endpoint(request: dict, db: Database = Depends(get_db)):
     db.set_response_decryption_config(enabled=request.get('enabled'))
     return {"success": True, "message": "Config updated"}
+
+@admin_router.get("/keep-alive/status", summary="获取 Keep-Alive 状态")
+async def get_keep_alive_status(db: Database = Depends(get_db)):
+    return {"success": True, "config": db.get_keep_alive_config()}
+
+@admin_router.post("/keep-alive/toggle", summary="切换 Keep-Alive 状态")
+async def toggle_keep_alive(request: dict, db: Database = Depends(get_db)):
+    db.set_keep_alive_config(enabled=request.get('enabled'))
+    return {"success": True, "message": "Keep-Alive status updated"}
+
+@admin_router.post("/keep-alive/ping", summary="手动触发 Keep-Alive")
+async def ping_keep_alive():
+    # This endpoint is a placeholder to allow manual triggering if needed.
+    # The actual keep-alive logic is handled by the background task.
+    return {"success": True, "message": "Ping acknowledged. Keep-alive is managed by a background task."}
 
 @admin_router.get("/keys/gemini", summary="获取所有Gemini密钥")
 async def get_gemini_keys_endpoint(db: Database = Depends(get_db)):
