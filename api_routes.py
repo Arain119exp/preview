@@ -26,7 +26,7 @@ from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
                        inject_prompt_to_messages, openai_to_gemini,
                        upload_file_to_gemini, validate_file_for_gemini)
 from database import Database
-from app_utils import auto_cleanup_failed_keys
+from api_services import auto_cleanup_failed_keys
 from dependencies import (get_anti_detection, get_db, get_keep_alive_enabled,
                           get_request_count, get_start_time)
 
