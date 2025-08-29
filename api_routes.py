@@ -754,18 +754,18 @@ async def get_admin_stats(
     request_count: int = Depends(get_request_count)
 ):
     """获取核心管理统计数据，用于仪表盘展示。"""
-    health_summary = db.get_keys_health_summary()
+    health_summary = db.get_gemini_keys_health_summary()
     uptime = time.time() - start_time
     
     return {
         "total_requests": request_count,
         "uptime_seconds": int(uptime),
-        "active_gemini_keys": len(db.get_available_gemini_keys()),
-        "total_gemini_keys": len(db.get_gemini_keys()),
+        "active_gemini_keys": len(db.get_round_robin_key()),
+        "total_gemini_keys": len(db.get_all_gemini_keys()),
         "healthy_gemini_keys": health_summary.get('healthy', 0),
-        "total_user_keys": len(db.get_user_keys()),
+        "total_user_keys": len(db.get_all_user_keys()),
         "database_size_mb": os.path.getsize(db.db_path) / 1024 / 1024 if os.path.exists(db.db_path) else 0,
-        "usage_stats": db.get_all_usage_stats(),
+        "usage_stats": db.get_usage_stats(),
         "failover_config": db.get_failover_config()
     }
 
