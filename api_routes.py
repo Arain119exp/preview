@@ -746,5 +746,29 @@ async def get_logs(limit: int = 100, db: Database = Depends(get_db)):
     # This is a placeholder. In a real app, you'd read from a log file or a logging service.
     return {"message": "Log fetching is not fully implemented in this version."}
 
+
+@admin_router.get("/stats", summary="获取管理统计信息")
+async def get_admin_stats(
+    db: Database = Depends(get_db),
+    start_time: float = Depends(get_start_time),
+    request_count: int = Depends(get_request_count)
+):
+    """获取核心管理统计数据，用于仪表盘展示。"""
+    health_summary = db.get_keys_health_summary()
+    uptime = time.time() - start_time
+    
+    return {
+        "total_requests": request_count,
+        "uptime_seconds": int(uptime),
+        "active_gemini_keys": len(db.get_available_gemini_keys()),
+        "total_gemini_keys": len(db.get_gemini_keys()),
+        "healthy_gemini_keys": health_summary.get('healthy', 0),
+        "total_user_keys": len(db.get_user_keys()),
+        "database_size_mb": os.path.getsize(db.db_path) / 1024 / 1024 if os.path.exists(db.db_path) else 0,
+        "usage_stats": db.get_all_usage_stats(),
+        "failover_config": db.get_failover_config()
+    }
+
+
 # 将管理路由包含到主路由中
 router.include_router(admin_router)
