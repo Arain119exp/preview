@@ -760,7 +760,7 @@ async def get_admin_stats(
     return {
         "total_requests": request_count,
         "uptime_seconds": int(uptime),
-        "active_gemini_keys": len(db.get_round_robin_key()),
+        "active_gemini_keys": len(db.get_available_gemini_keys()),
         "total_gemini_keys": len(db.get_all_gemini_keys()),
         "healthy_gemini_keys": health_summary.get('healthy', 0),
         "total_user_keys": len(db.get_all_user_keys()),
