@@ -435,7 +435,7 @@ async def update_response_decryption_config_endpoint(request: dict, db: Database
 async def get_gemini_keys_endpoint(db: Database = Depends(get_db)):
     return {"success": True, "keys": db.get_all_gemini_keys()}
 
-@admin_router.post("/keys/gemini", summary="添加Gemini密钥")
+@admin_router.post("/config/gemini-key", summary="添加Gemini密钥")
 async def add_gemini_key_endpoint(request: dict, db: Database = Depends(get_db)):
     keys_str = request.get("key", "")
     keys = [k.strip() for k in re.split(r'[,;\s\n\r]+', keys_str) if k.strip()]
@@ -461,7 +461,7 @@ async def toggle_gemini_key_status_endpoint(key_id: int, db: Database = Depends(
 async def get_user_keys_endpoint(db: Database = Depends(get_db)):
     return {"success": True, "keys": db.get_all_user_keys()}
 
-@admin_router.post("/keys/user", summary="生成用户密钥")
+@admin_router.post("/config/user-key", summary="生成用户密钥")
 async def generate_user_key_endpoint(request: dict, db: Database = Depends(get_db)):
     name = request.get("name", "API User")
     key = db.generate_user_key(name)
@@ -537,6 +537,3 @@ async def get_admin_stats_endpoint(db: Database = Depends(get_db), anti_detectio
         "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
         "failover_config": db.get_failover_config()
     }
-
-# Include the admin router in the main router
-router.include_router(admin_router)
