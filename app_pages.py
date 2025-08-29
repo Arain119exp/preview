@@ -1062,10 +1062,6 @@ def render_system_settings_page():
                     else:
                         st.error("配置保存失败，请重试")
 
-                if refresh_stats:
-                    st.cache_data.clear()
-                    st.rerun()
-
     with tab6:  # 自动清理标签页
         st.markdown("#### 自动清理配置")
         st.markdown("智能识别并自动移除连续异常的API密钥")
