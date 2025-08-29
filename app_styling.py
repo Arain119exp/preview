@@ -500,12 +500,6 @@ def apply_styling():
         background: rgba(255, 255, 255, 0.12);
     }
 
-    /* 移动端禁用Logo悬停动画 */
-    @media (max-width: 768px) {
-        .sidebar-logo:hover {
-            transform: none;
-        }
-    }
 
     .sidebar-logo:hover::before {
         left: 100%;
@@ -701,17 +695,6 @@ def apply_styling():
             inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
     }
 
-    /* 移动端禁用导航悬停动画 */
-    @media (max-width: 768px) {
-        section[data-testid="stSidebar"] .stRadio > div > label:hover {
-            transform: none !important;
-        }
-
-        section[data-testid="stSidebar"] .stRadio > div > label:active {
-            transform: scale(0.98) !important;
-            transition: transform 0.1s ease !important;
-        }
-    }
 
     section[data-testid="stSidebar"] .stRadio > div > label:hover::before {
         opacity: 1;
@@ -844,12 +827,6 @@ def apply_styling():
             inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
 
-    /* 移动端禁用状态卡片悬停 */
-    @media (max-width: 768px) {
-        .sidebar-status-card:hover {
-            transform: none;
-        }
-    }
 
     .sidebar-status-title {
         font-size: 0.875rem;
@@ -1005,16 +982,6 @@ def apply_styling():
         transform: translateY(-1px);
     }
 
-    /* 移动端禁用链接悬停动画 */
-    @media (max-width: 768px) {
-        .sidebar-footer-link:hover {
-            transform: none;
-        }
-
-        .sidebar-footer-link:active {
-            background: rgba(255, 255, 255, 0.15);
-        }
-    }
 
     /* 按钮玻璃效果 */
     .stButton > button {
@@ -1063,17 +1030,6 @@ def apply_styling():
         color: #4338ca;
     }
 
-    /* 按钮 */
-    @media (max-width: 768px) {
-        .stButton > button:hover {
-            transform: none;
-        }
-
-        .stButton > button:active {
-            transform: scale(0.98);
-            transition: transform 0.1s ease;
-        }
-    }
 
     .stButton > button:hover::before {
         left: 100%;
@@ -1122,15 +1078,6 @@ def apply_styling():
         transform: translateY(-1px);
     }
 
-    /* 移动端输入框聚焦优化 */
-    @media (max-width: 768px) {
-        .stTextInput > div > div > input:focus,
-        .stNumberInput > div > div > input:focus,
-        .stSelectbox > div > div > select:focus,
-        .stTextArea > div > div > textarea:focus {
-            transform: none;
-        }
-    }
 
     /* 健康状态标签玻璃效果 */
     .status-badge {
@@ -1170,12 +1117,6 @@ def apply_styling():
             inset 0 1px 0 rgba(255, 255, 255, 0.5);
     }
 
-    /* 移动端禁用状态标签悬停 */
-    @media (max-width: 768px) {
-        .status-badge:hover {
-            transform: none;
-        }
-    }
 
     .status-healthy {
         background: rgba(16, 185, 129, 0.15);
@@ -1256,12 +1197,6 @@ def apply_styling():
         background: rgba(255, 255, 255, 0.5);
     }
 
-    /* 移动端禁用密钥卡片悬停 */
-    @media (max-width: 768px) {
-        div[data-testid="stHorizontalBlock"]:hover {
-            transform: none;
-        }
-    }
 
     /* 密钥代码显示 */
     .key-code {
@@ -1637,36 +1572,6 @@ def apply_styling():
         }
     }
 
-    /* 移动端性能优化 */
-    @media (max-width: 768px) {
-        * {
-            -webkit-tap-highlight-color: transparent;
-            -webkit-touch-callout: none;
-        }
-
-        /* 允许文本和特定元素的选择 */
-        input, textarea, .key-code, [data-testid="stAlert"], p, span, div {
-            -webkit-user-select: text !important;
-            -khtml-user-select: text !important;
-            -moz-user-select: text !important;
-            -ms-user-select: text !important;
-            user-select: text !important;
-        }
-
-        /* 按钮和导航保持不可选择 */
-        button, .stRadio label, .sidebar-logo {
-            -webkit-user-select: none !important;
-            -khtml-user-select: none !important;
-            -moz-user-select: none !important;
-            -ms-user-select: none !important;
-            user-select: none !important;
-        }
-
-        .stApp {
-            overflow-x: hidden;
-            overflow-y: auto;
-        }
-    }
 
     /* 移动端横屏适配 */
     @media (max-width: 1024px) and (orientation: landscape) {

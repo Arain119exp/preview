@@ -148,14 +148,10 @@ async def collect_gemini_response_directly(
                         total_tokens += len(text.split())
                         is_thought = part.get("thought", False)
                         include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-                        if is_thought and not include_thoughts:
-                            # 仅记录思考，不直接输出
-                            thinking_content += text
-                        else:
-                            if is_thought and not thinking_content and not complete_content:
-                                complete_content += "**Thinking Process:**\n"
-                            elif not is_thought and thinking_content and not complete_content.endswith("**Response:**\n"):
-                                complete_content += "\n\n**Response:**\n"
+                        
+                        # If including thoughts, append everything.
+                        # If not including thoughts, only append non-thought parts.
+                        if include_thoughts or not is_thought:
                             complete_content += text
                     finish_reason_raw = candidate.get("finishReason", "stop")
                     finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
@@ -603,50 +599,23 @@ async def stream_gemini_response_single_attempt(
                                 full_response += text_to_send
 
                                 is_thought = getattr(part, "thought", False)
-                                if is_thought and not (openai_request.thinking_config and openai_request.thinking_config.include_thoughts):
-                                    continue
+                                include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
 
-                                if is_thought and not thinking_sent:
-                                    thinking_header = {
+                                # If including thoughts, send everything.
+                                # If not, only send non-thought parts.
+                                if include_thoughts or not is_thought:
+                                    chunk_data = {
                                         "id": stream_id,
                                         "object": "chat.completion.chunk",
                                         "created": created,
                                         "model": openai_request.model,
                                         "choices": [{
                                             "index": 0,
-                                            "delta": {"content": "**Thinking Process:**\n"},
+                                            "delta": {"content": text_to_send},
                                             "finish_reason": None
                                         }]
                                     }
-                                    yield f"data: {json.dumps(thinking_header, ensure_ascii=False)}\n\n".encode('utf-8')
-                                    thinking_sent = True
-                                elif not is_thought and thinking_sent:
-                                    response_header = {
-                                        "id": stream_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": openai_request.model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {"content": "\n\n**Response:**\n"},
-                                            "finish_reason": None
-                                        }]
-                                    }
-                                    yield f"data: {json.dumps(response_header, ensure_ascii=False)}\n\n".encode('utf-8')
-                                    thinking_sent = False
-
-                                chunk_data = {
-                                    "id": stream_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": openai_request.model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"content": text_to_send},
-                                        "finish_reason": None
-                                    }]
-                                }
-                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
+                                    yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
 
                         finish_reason = getattr(candidate, "finish_reason", None)
                         if finish_reason:

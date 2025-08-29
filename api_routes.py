@@ -330,11 +330,16 @@ async def chat_completions(
     stream_mode = db.get_stream_mode_config().get('mode', 'auto')
     has_tool_calls = bool(request.tools or request.tool_choice)
     decryption_enabled = db.get_response_decryption_config().get('enabled', False)
+    anti_truncation_enabled = db.get_anti_truncation_config().get('enabled', False)
 
+    # If user requests stream but a feature requires non-stream processing from Gemini
+    # (e.g., decryption, tools, anti-truncation), use the keep-alive streaming method.
+    if request.stream and (decryption_enabled or has_tool_calls or anti_truncation_enabled):
+        return StreamingResponse(stream_non_stream_keep_alive(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
+
+    # Determine final stream status based on config and user request for true streaming cases
     should_stream = request.stream
-    if decryption_enabled or has_tool_calls:
-        should_stream = False
-    elif stream_mode == 'stream':
+    if stream_mode == 'stream':
         should_stream = True
     elif stream_mode == 'non_stream':
         should_stream = False
