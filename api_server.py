@@ -56,12 +56,14 @@ async def lifespan(app: FastAPI):
         
         scheduler.add_job(
             record_hourly_health_check, 'interval', hours=1,
-            id='hourly_health_check', max_instances=1, coalesce=True
+            id='hourly_health_check', max_instances=1, coalesce=True,
+            kwargs={'db': db}
         )
         
         scheduler.add_job(
             auto_cleanup_failed_keys, 'cron', hour=2, minute=0,
-            id='daily_cleanup', max_instances=1, coalesce=True
+            id='daily_cleanup', max_instances=1, coalesce=True,
+            kwargs={'db': db}
         )
         
         scheduler.start()
