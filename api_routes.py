@@ -754,7 +754,7 @@ async def get_admin_stats(
     request_count: int = Depends(get_request_count)
 ):
     """获取核心管理统计数据，用于仪表盘展示。"""
-    health_summary = db.get_gemini_keys_health_summary()
+    health_summary = db.get_keys_health_summary()
     uptime = time.time() - start_time
     
     return {
