@@ -46,6 +46,19 @@ if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
 MAX_INLINE_SIZE = 20 * 1024 * 1024
+MAX_FILE_SIZE = 100 * 1024 * 1024
+SUPPORTED_MIME_TYPES = {
+    # Images
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp",
+    # Audio
+    "audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4", "audio/flac", "audio/aac",
+    # Video
+    "video/mp4", "video/x-msvideo", "video/quicktime", "video/webm",
+    # Documents
+    "application/pdf", "text/plain", "text/csv",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
 
 # ===============================================================================
 # General and v1 API Routes
@@ -224,7 +237,12 @@ async def upload_file(
 
     file_content = await file.read()
     mime_type = file.content_type or mimetypes.guess_type(file.filename)[0] or 'application/octet-stream'
-    validation_result = validate_file_for_gemini(file_content, mime_type, file.filename)
+    validation_result = validate_file_for_gemini(
+        file_content, mime_type, file.filename,
+        supported_mime_types=SUPPORTED_MIME_TYPES,
+        max_file_size=MAX_FILE_SIZE,
+        max_inline_size=MAX_INLINE_SIZE
+    )
     file_id = f"file-{uuid.uuid4().hex}"
     file_info = {
         "id": file_id, "object": "file", "bytes": validation_result["size"], "created_at": int(time.time()),
@@ -294,7 +312,8 @@ async def delete_file(file_id: str, authorization: str = Header(None), db: Datab
 async def chat_completions(
         request: ChatCompletionRequest,
         authorization: str = Header(None),
-        db: Database = Depends(get_db)
+        db: Database = Depends(get_db),
+        anti_detection: GeminiAntiDetectionInjector = Depends(get_anti_detection)
 ):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -302,9 +321,9 @@ async def chat_completions(
     if not user_key_info:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    actual_model_name = get_actual_model_name(request.model)
-    request.messages = inject_prompt_to_messages(request.messages)
-    gemini_request = openai_to_gemini(request, enable_anti_detection=True)
+    actual_model_name = get_actual_model_name(db, request.model)
+    request.messages = inject_prompt_to_messages(db, request.messages)
+    gemini_request = openai_to_gemini(db, request, anti_detection, file_storage, enable_anti_detection=True)
 
     stream_mode = db.get_stream_mode_config().get('mode', 'auto')
     has_tool_calls = bool(request.tools or request.tool_choice)
