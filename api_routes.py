@@ -28,7 +28,8 @@ from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
 from database import Database
 from api_services import auto_cleanup_failed_keys
 from dependencies import (get_anti_detection, get_db, get_keep_alive_enabled,
-                          get_request_count, get_start_time)
+                          get_request_count, get_start_time, get_rate_limiter)
+from api_utils import RateLimitCache
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +314,8 @@ async def chat_completions(
         request: ChatCompletionRequest,
         authorization: str = Header(None),
         db: Database = Depends(get_db),
-        anti_detection: GeminiAntiDetectionInjector = Depends(get_anti_detection)
+        anti_detection: GeminiAntiDetectionInjector = Depends(get_anti_detection),
+        rate_limiter: RateLimitCache = Depends(get_rate_limiter)
 ):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -339,14 +341,14 @@ async def chat_completions(
 
     if should_stream:
         if await should_use_fast_failover(db):
-            return StreamingResponse(stream_with_fast_failover(gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
+            return StreamingResponse(stream_with_fast_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
         else:
-            return StreamingResponse(stream_with_failover(gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
+            return StreamingResponse(stream_with_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
     else:
         if await should_use_fast_failover(db):
-            response = await make_request_with_fast_failover(gemini_request, request, actual_model_name, user_key_info)
+            response = await make_request_with_fast_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info)
         else:
-            response = await make_request_with_failover(gemini_request, request, actual_model_name, user_key_info)
+            response = await make_request_with_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info)
         return JSONResponse(content=response)
 
 @router.get("/v1/models", summary="列出可用模型", tags=["用户 API"])

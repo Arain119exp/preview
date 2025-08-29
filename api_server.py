@@ -11,8 +11,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import Database
 from api_routes import router as api_router, admin_router
-from dependencies import get_db, get_start_time, get_request_count, get_keep_alive_enabled, get_anti_detection
-from api_utils import GeminiAntiDetectionInjector, keep_alive_ping
+from dependencies import get_db, get_start_time, get_request_count, get_keep_alive_enabled, get_anti_detection, get_rate_limiter
+from api_utils import GeminiAntiDetectionInjector, keep_alive_ping, RateLimitCache
 from api_services import record_hourly_health_check, auto_cleanup_failed_keys
 
 # Configure logging
@@ -34,6 +34,7 @@ keep_alive_enabled = os.getenv('ENABLE_KEEP_ALIVE', default_keep_alive).lower() 
 # Initialize database and anti-detection injector
 db = Database()
 anti_detection = GeminiAntiDetectionInjector()
+rate_limiter = RateLimitCache()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -120,10 +121,14 @@ def _get_keep_alive_enabled():
 def _get_anti_detection():
     return anti_detection
 
+def _get_rate_limiter():
+    return rate_limiter
+
 app.dependency_overrides[get_db] = _get_db
 app.dependency_overrides[get_start_time] = _get_start_time
 app.dependency_overrides[get_request_count] = _get_request_count
 app.dependency_overrides[get_keep_alive_enabled] = _get_keep_alive_enabled
 app.dependency_overrides[get_anti_detection] = _get_anti_detection
+app.dependency_overrides[get_rate_limiter] = _get_rate_limiter
 
 logger.info("✅ FastAPI app initialized with routes and dependencies.")
