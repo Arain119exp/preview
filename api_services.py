@@ -147,11 +147,9 @@ async def collect_gemini_response_directly(
                             continue
                         total_tokens += len(text.split())
                         is_thought = part.get("thought", False)
-                        include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-                        
-                        # If including thoughts, append everything.
-                        # If not including thoughts, only append non-thought parts.
-                        if include_thoughts or not is_thought:
+                        if is_thought:
+                            thinking_content += text
+                        else:
                             complete_content += text
                     finish_reason_raw = candidate.get("finishReason", "stop")
                     finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
@@ -255,20 +253,41 @@ async def collect_gemini_response_directly(
                 logger.warning(f"Anti-truncation continuation attempt failed: {e}")
                 break
 
+    # 分离思考和内容
+    thinking_content_final = thinking_content.strip()
+    complete_content_final = complete_content.strip()
+
     # 计算token使用量
     prompt_tokens = len(str(openai_request.messages).split())
-    completion_tokens = len(complete_content.split())
+    reasoning_tokens = len(thinking_content_final.split())
+    completion_tokens = len(complete_content_final.split())
 
     # 如果启用了响应解密，则解密内容
     decryption_enabled = db.get_response_decryption_config().get('enabled', False)
     if decryption_enabled:
-        logger.info(f"Decrypting response. Original length: {len(complete_content)}")
-        final_content = decrypt_response(complete_content.strip())
+        logger.info(f"Decrypting response. Original length: {len(complete_content_final)}")
+        final_content = decrypt_response(complete_content_final)
         logger.info(f"Decrypted length: {len(final_content)}")
     else:
-        final_content = complete_content.strip()
+        final_content = complete_content_final
 
     # 构建最终响应
+    message = {
+        "role": "assistant",
+        "content": final_content
+    }
+    if thinking_content_final:
+        message["reasoning"] = thinking_content_final
+
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens
+    }
+    if reasoning_tokens > 0:
+        usage["reasoning_tokens"] = reasoning_tokens
+        usage["total_tokens"] += reasoning_tokens
+
     openai_response = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
         "object": "chat.completion",
@@ -276,20 +295,13 @@ async def collect_gemini_response_directly(
         "model": openai_request.model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": final_content
-            },
+            "message": message,
             "finish_reason": finish_reason
         }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens
-        }
+        "usage": usage
     }
 
-    logger.info(f"Successfully collected direct response: {len(complete_content)} chars, {completion_tokens} tokens")
+    logger.info(f"Successfully collected direct response: {len(final_content)} chars, {completion_tokens} tokens, {reasoning_tokens} reasoning tokens")
     return openai_response
 
 
@@ -579,43 +591,66 @@ async def stream_gemini_response_single_attempt(
                     for candidate in choices:
                         content = candidate.content or {}
                         parts = content.parts or []
-                        for part in parts:
+                        
+                        # Tool call streaming can be complex, aggregate parts first
+                        # This logic assumes tool calls might be streamed chunk by chunk.
+                        # A more robust implementation might need to accumulate parts across chunks.
+                        
+                        for i, part in enumerate(parts):
+                            delta = {}
+                            finish_reason_str = None
+
                             if hasattr(part, "text"):
                                 text = part.text
                                 if not text:
                                     continue
                                 total_tokens += len(text.split())
                                 has_content = True
-                                # Anti-truncation handling (stream)
+                                
+                                # Anti-truncation handling (stream) remains the same
+                                text_to_send = text
                                 if anti_trunc_cfg.get('enabled'):
                                     idx = text.find('[finish]')
                                     if idx != -1:
                                         text_to_send = text[:idx]
                                         saw_finish_tag = True
-                                    else:
-                                        text_to_send = text
-                                else:
-                                    text_to_send = text
                                 full_response += text_to_send
 
                                 is_thought = getattr(part, "thought", False)
-                                include_thoughts = bool(openai_request.thinking_config and openai_request.thinking_config.include_thoughts)
-
-                                # If including thoughts, send everything.
-                                # If not, only send non-thought parts.
-                                if include_thoughts or not is_thought:
-                                    chunk_data = {
-                                        "id": stream_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": openai_request.model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {"content": text_to_send},
-                                            "finish_reason": None
-                                        }]
+                                if is_thought:
+                                    delta["reasoning"] = text_to_send
+                                else:
+                                    delta["content"] = text_to_send
+                            
+                            elif hasattr(part, "function_call"):
+                                fc = part.function_call
+                                has_content = True
+                                # OpenAI streams tool calls with an index
+                                # We simulate this by creating a tool_call chunk per function call
+                                tool_call_chunk = {
+                                    "index": i, # Use part index as tool index
+                                    "id": f"call_{uuid.uuid4().hex}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": fc.name,
+                                        "arguments": json.dumps(fc.args, ensure_ascii=False)
                                     }
-                                    yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
+                                }
+                                delta["tool_calls"] = [tool_call_chunk]
+
+                            if delta:
+                                chunk_data = {
+                                    "id": stream_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": openai_request.model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": delta,
+                                        "finish_reason": None
+                                    }]
+                                }
+                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode('utf-8')
 
                         finish_reason = getattr(candidate, "finish_reason", None)
                         if finish_reason:

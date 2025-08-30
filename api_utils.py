@@ -274,22 +274,46 @@ def inject_prompt_to_messages(db: Database, messages: List[ChatMessage]) -> List
 
 def get_thinking_config(db: Database, request: ChatCompletionRequest) -> Dict:
     thinking_config = {}
+    
+    # 1. Check if thinking is globally disabled
     global_thinking_enabled = db.get_config('thinking_enabled', 'true').lower() == 'true'
-    if not global_thinking_enabled: return {"thinkingBudget": 0}
-    global_thinking_budget = int(db.get_config('thinking_budget', '-1'))
-    global_include_thoughts = db.get_config('include_thoughts', 'false').lower() == 'true'
-    if request.thinking_config:
-        if request.thinking_config.thinking_budget is not None:
-            thinking_config["thinkingBudget"] = request.thinking_config.thinking_budget
-        elif global_thinking_budget >= 0:
-            thinking_config["thinkingBudget"] = global_thinking_budget
-        if request.thinking_config.include_thoughts is not None:
-            thinking_config["includeThoughts"] = request.thinking_config.include_thoughts
-        elif global_include_thoughts:
-            thinking_config["includeThoughts"] = global_include_thoughts
+    if not global_thinking_enabled:
+        return {"thinkingBudget": 0}
+
+    # 2. Determine budget and include_thoughts based on priority
+    budget = None
+    include_thoughts = None
+
+    # Priority 1: User-provided thinking_config.thinking_budget
+    if request.thinking_config and request.thinking_config.thinking_budget is not None:
+        budget = request.thinking_config.thinking_budget
+    
+    # Priority 2: User-provided reasoning_effort (if budget is not already set)
+    # The logic in api_models.py handles "low" and "medium" by creating a thinking_config,
+    # so we only need to handle "high" here as a special case.
+    if budget is None and request.reasoning_effort == "high":
+        if 'pro' in request.model:
+            budget = 32768  # Pro max
+        else:  # Default to flash max for other models like flash
+            budget = 24576  # Flash max
+
+    # Priority 3: Global config from DB (if budget is still not set)
+    if budget is None:
+        budget = int(db.get_config('thinking_budget', '-1'))
+
+    # Determine include_thoughts (user request > global config)
+    if request.thinking_config and request.thinking_config.include_thoughts is not None:
+        include_thoughts = request.thinking_config.include_thoughts
     else:
-        if global_thinking_budget >= 0: thinking_config["thinkingBudget"] = global_thinking_budget
-        if global_include_thoughts: thinking_config["includeThoughts"] = global_include_thoughts
+        include_thoughts = db.get_config('include_thoughts', 'false').lower() == 'true'
+
+    # 3. Build the final config dictionary
+    if budget is not None and budget != 0:
+        thinking_config["thinkingBudget"] = budget
+    
+    if include_thoughts:
+        thinking_config["includeThoughts"] = include_thoughts
+
     return thinking_config
 
 def process_multimodal_content(item: Dict, file_storage: Dict) -> Optional[Dict]:
@@ -342,7 +366,12 @@ def should_apply_anti_detection(db: Database, request: ChatCompletionRequest, an
         logger.info("Anti-detection disabled for tool calls")
         return False
     token_threshold = int(db.get_config('anti_detection_token_threshold', '5000'))
-    total_tokens = sum(estimate_token_count(item.get('text', '')) for msg in request.messages if isinstance(msg.content, list) for item in msg.content if isinstance(item, dict) and item.get('type') == 'text')
+    total_tokens = 0
+    for msg in request.messages:
+        if isinstance(msg.content, str):
+            total_tokens += estimate_token_count(msg.content)
+        elif isinstance(msg.content, list):
+            total_tokens += sum(estimate_token_count(item.get('text', '')) for item in msg.content if isinstance(item, dict) and item.get('type') == 'text')
     if total_tokens < token_threshold:
         logger.info(f"Anti-detection skipped: token count {total_tokens} below threshold {token_threshold}")
         return False
@@ -351,12 +380,102 @@ def should_apply_anti_detection(db: Database, request: ChatCompletionRequest, an
 
 def openai_to_gemini(db: Database, request: ChatCompletionRequest, anti_detection_injector: GeminiAntiDetectionInjector, file_storage: Dict, enable_anti_detection: bool = True) -> Dict:
     contents = []
+    tool_declarations = []
+    tool_config = None
+    
+    # 1. Convert OpenAI tools to Gemini FunctionDeclarations
+    if request.tools:
+        for tool in request.tools:
+            if tool.get("type") == "function":
+                func_info = tool.get("function", {})
+                tool_declarations.append(
+                    types.FunctionDeclaration(
+                        name=func_info.get("name"),
+                        description=func_info.get("description"),
+                        parameters=func_info.get("parameters")
+                    )
+                )
+    
+    gemini_tools = [types.Tool(function_declarations=tool_declarations)] if tool_declarations else None
+
+    # 2. Convert OpenAI tool_choice to Gemini ToolConfig
+    if request.tool_choice:
+        if isinstance(request.tool_choice, str):
+            if request.tool_choice == "none":
+                tool_config = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingMode.NONE)
+                )
+            elif request.tool_choice == "auto":
+                tool_config = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingMode.AUTO)
+                )
+        elif isinstance(request.tool_choice, dict):
+            func_name = request.tool_choice.get("function", {}).get("name")
+            if func_name:
+                tool_config = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingMode.ANY,
+                        allowed_function_names=[func_name]
+                    )
+                )
+
+    # 3. Process messages and handle tool calls/responses
     anti_detection_enabled = should_apply_anti_detection(db, request, anti_detection_injector, enable_anti_detection)
+    
+    # Track tool_call_id to function_name mapping
+    tool_call_id_to_name = {}
+
     for msg in request.messages:
+        # First pass to find assistant tool calls and build the map
+        if msg.role == "assistant" and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            for tool_call in msg.tool_calls:
+                if tool_call.get("type") == "function":
+                    tool_call_id_to_name[tool_call.get("id")] = tool_call.get("function", {}).get("name")
+
+    for msg in request.messages:
+        # In Gemini, 'tool' role messages are sent as 'user' role
+        role = "user" if msg.role in ["system", "user", "tool"] else "model"
         parts = []
-        if isinstance(msg.content, str):
+
+        if msg.role == "tool":
+            func_name = tool_call_id_to_name.get(msg.tool_call_id)
+            if func_name:
+                # Ensure content is a serializable dict
+                try:
+                    response_content = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                except json.JSONDecodeError:
+                    response_content = {"content": msg.content}
+
+                parts.append(types.Part(
+                    function_response=types.FunctionResponse(
+                        name=func_name,
+                        response=response_content
+                    )
+                ))
+            else:
+                logger.warning(f"Could not find function name for tool_call_id: {msg.tool_call_id}")
+                continue # Skip this tool message if we can't map it
+        
+        elif msg.role == "assistant" and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            # This is a tool call request from the model, convert to Gemini's FunctionCall
+            for tool_call in msg.tool_calls:
+                if tool_call.get("type") == "function":
+                    func = tool_call.get("function", {})
+                    try:
+                        args = json.loads(func.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {} # Default to empty dict if arguments are not valid JSON
+                    parts.append(types.Part(
+                        function_call=types.FunctionCall(
+                            name=func.get("name"),
+                            args=args
+                        )
+                    ))
+        
+        elif isinstance(msg.content, str):
             text_content = anti_detection_injector.inject_symbols(msg.content) if anti_detection_enabled and msg.role == 'user' else msg.content
             parts.append({"text": f"[System]: {text_content}" if msg.role == "system" else text_content})
+        
         elif isinstance(msg.content, list):
             for item in msg.content:
                 if isinstance(item, str):
@@ -369,38 +488,85 @@ def openai_to_gemini(db: Database, request: ChatCompletionRequest, anti_detectio
                     elif item.get('type') in ['image', 'image_url', 'audio', 'video', 'document']:
                         multimodal_part = process_multimodal_content(item, file_storage)
                         if multimodal_part: parts.append(multimodal_part)
-        if parts: contents.append({"role": "user" if msg.role in ["system", "user"] else "model", "parts": parts})
+
+        if parts:
+            contents.append({"role": role, "parts": parts})
+
     thinking_config = get_thinking_config(db, request)
     thinking_cfg_obj = types.ThinkingConfig(**thinking_config) if thinking_config else None
-    afc_obj = types.AutomaticFunctionCallingConfig(disable=True)
+    
     generation_config = types.GenerateContentConfig(
         temperature=request.temperature, top_p=request.top_p, candidate_count=request.n,
         thinking_config=thinking_cfg_obj, max_output_tokens=request.max_tokens,
-        stop_sequences=request.stop, automatic_function_calling=afc_obj
+        stop_sequences=request.stop
     )
-    return {"contents": contents, "generation_config": generation_config}
+    
+    gemini_request = {
+        "contents": contents,
+        "generation_config": generation_config
+    }
+    if gemini_tools:
+        gemini_request["tools"] = gemini_tools
+    if tool_config:
+        gemini_request["tool_config"] = tool_config
+        
+    return gemini_request
 
-def extract_thoughts_and_content(gemini_response: Dict, include_thoughts: bool = True) -> tuple[str, str]:
+def extract_thoughts_and_content(gemini_response: Dict) -> tuple[str, str, List[Dict]]:
     thoughts, content = "", ""
-    for candidate in gemini_response.get("candidates", []):
+    tool_calls = []
+    
+    # Assuming we only process the first candidate for tool calls for simplicity
+    candidate = gemini_response.get("candidates", [{}])[0]
+    
+    if candidate and candidate.get("content", {}).get("parts"):
         for part in candidate.get("content", {}).get("parts", []):
             if "text" in part and part["text"]:
                 if part.get("thought", False):
                     thoughts += part["text"]
-                    if not include_thoughts: content += part["text"]
-                else: content += part["text"]
-    return thoughts, content
+                else:
+                    content += part["text"]
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex}",
+                    "type": "function",
+                    "function": {
+                        "name": fc.get("name"),
+                        "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False)
+                    }
+                })
+            
+    return thoughts.strip(), content.strip(), tool_calls
 
 def gemini_to_openai(gemini_response: Dict, request: ChatCompletionRequest, usage_info: Dict = None) -> Dict:
     choices = []
-    include_thoughts = request.thinking_config and request.thinking_config.include_thoughts
-    thoughts, content = extract_thoughts_and_content(gemini_response, include_thoughts)
-    for i, candidate in enumerate(gemini_response.get("candidates", [])):
-        message_content = f"**Thinking:**\n{thoughts}\n\n**Response:**\n{content}" if thoughts and include_thoughts else content
-        choices.append({
-            "index": i, "message": {"role": "assistant", "content": message_content},
-            "finish_reason": map_finish_reason(candidate.get("finishReason", "STOP"))
-        })
+    thoughts, content, tool_calls = extract_thoughts_and_content(gemini_response)
+    
+    # We'll process based on the first candidate
+    candidate = gemini_response.get("candidates", [{}])[0]
+    finish_reason = map_finish_reason(candidate.get("finishReason", "STOP"))
+
+    message = {"role": "assistant"}
+    
+    if content:
+        message["content"] = content
+    else:
+        # Per OpenAI spec, content is null if tool_calls are present
+        message["content"] = None
+
+    if thoughts:
+        message["reasoning"] = thoughts
+        
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    choices.append({
+        "index": 0,
+        "message": message,
+        "finish_reason": finish_reason
+    })
+    
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}", "object": "chat.completion", "created": int(time.time()),
         "model": request.model, "choices": choices,
@@ -408,7 +574,14 @@ def gemini_to_openai(gemini_response: Dict, request: ChatCompletionRequest, usag
     }
 
 def map_finish_reason(gemini_reason: str) -> str:
-    return {"STOP": "stop", "MAX_TOKENS": "length", "SAFETY": "content_filter", "RECITATION": "content_filter", "OTHER": "stop"}.get(gemini_reason, "stop")
+    return {
+        "STOP": "stop",
+        "MAX_TOKENS": "length",
+        "SAFETY": "content_filter",
+        "RECITATION": "content_filter",
+        "TOOL_CALL": "tool_calls",
+        "OTHER": "stop"
+    }.get(gemini_reason, "stop")
 
 def validate_file_for_gemini(file_content: bytes, mime_type: str, filename: str, supported_mime_types: set, max_file_size: int, max_inline_size: int) -> Dict[str, Any]:
     file_size = len(file_content)

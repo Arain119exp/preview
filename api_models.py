@@ -85,6 +85,7 @@ class ContentPart(BaseModel):
 class ChatMessage(BaseModel):
     role: str
     content: Union[str, List[Union[str, Dict[str, Any], ContentPart]]]
+    reasoning: Optional[str] = None
 
     class Config:
         extra = "allow"
@@ -143,6 +144,7 @@ class ChatCompletionRequest(BaseModel):
     # OpenAI Compatible 工具调用字段
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    reasoning_effort: Optional[str] = None
 
     class Config:
         extra = "allow"
@@ -159,3 +161,12 @@ class ChatCompletionRequest(BaseModel):
             data['max_tokens'] = max(1, data['max_tokens'])
 
         super().__init__(**data)
+
+        # reasoning_effort to thinking_budget mapping
+        if self.reasoning_effort and not self.thinking_config:
+            budget_map = {
+                "low": 4096,
+                "medium": 8192,
+            }
+            if self.reasoning_effort in budget_map:
+                self.thinking_config = ThinkingConfig(thinking_budget=budget_map[self.reasoning_effort])
