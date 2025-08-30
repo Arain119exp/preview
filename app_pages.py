@@ -19,7 +19,10 @@ from app_utils import (
     update_failover_config,
     get_cached_cleanup_status,
     update_cleanup_config,
-    manual_cleanup
+    manual_cleanup,
+    delete_unhealthy_gemini_keys,
+    get_hourly_stats,
+    get_recent_logs
 )
 
 def render_dashboard_page():
@@ -157,7 +160,7 @@ def render_dashboard_page():
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpm, width='stretch', config={
+                st.plotly_chart(fig_rpm, use_container_width=True, config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -197,7 +200,7 @@ def render_dashboard_page():
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpd, width='stretch', config={
+                st.plotly_chart(fig_rpd, use_container_width=True, config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -214,9 +217,108 @@ def render_dashboard_page():
                 display_df.columns = ['模型', '分钟请求', '分钟限制', '分钟使用率', '日请求', '日限制', '日使用率']
                 display_df['分钟使用率'] = display_df['分钟使用率'].apply(lambda x: f"{x:.1f}%")
                 display_df['日使用率'] = display_df['日使用率'].apply(lambda x: f"{x:.1f}%")
-                st.dataframe(display_df, width='stretch', hide_index=True)
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
     else:
         st.info("暂无使用数据")
+
+    # --- 过去24小时请求统计 ---
+    st.markdown("### 过去24小时请求统计")
+    hourly_data = get_hourly_stats()
+
+    if hourly_data and hourly_data.get("success") and hourly_data.get("stats"):
+        stats = hourly_data["stats"]
+        df_hourly = pd.DataFrame(stats)
+        df_hourly['hour'] = pd.to_datetime(df_hourly['hour'])
+        df_hourly['failure_rate'] = (df_hourly['failed_requests'] / df_hourly['total_requests'] * 100).fillna(0)
+
+        fig = go.Figure()
+
+        # 添加总请求数折线
+        fig.add_trace(go.Scatter(
+            x=df_hourly['hour'],
+            y=df_hourly['total_requests'],
+            mode='lines+markers',
+            name='总请求数',
+            line=dict(color='rgba(99, 102, 241, 0.8)', width=2),
+            marker=dict(size=5)
+        ))
+
+        # 添加失败请求数折线
+        fig.add_trace(go.Scatter(
+            x=df_hourly['hour'],
+            y=df_hourly['failed_requests'],
+            mode='lines+markers',
+            name='失败数',
+            line=dict(color='rgba(239, 68, 68, 0.8)', width=2),
+            marker=dict(size=5)
+        ))
+
+        # 添加失败率折线 (在第二个y轴)
+        fig.add_trace(go.Scatter(
+            x=df_hourly['hour'],
+            y=df_hourly['failure_rate'],
+            mode='lines',
+            name='失败率 (%)',
+            line=dict(color='rgba(245, 158, 11, 0.7)', width=2, dash='dot'),
+            yaxis='y2'
+        ))
+
+        fig.update_layout(
+            height=400,
+            title_font=dict(size=16, color='#1f2937', family='-apple-system, BlinkMacSystemFont'),
+            plot_bgcolor='rgba(255, 255, 255, 0.3)',
+            paper_bgcolor='rgba(255, 255, 255, 0.3)',
+            font=dict(family='-apple-system, BlinkMacSystemFont', color='#374151', size=12),
+            xaxis=dict(gridcolor='rgba(107, 114, 128, 0.2)'),
+            yaxis=dict(
+                title='请求数',
+                gridcolor='rgba(107, 114, 128, 0.2)'
+            ),
+            yaxis2=dict(
+                title='失败率 (%)',
+                overlaying='y',
+                side='right',
+                showgrid=False,
+                range=[0, 100]
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            margin=dict(l=0, r=0, t=50, b=0)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("暂无过去24小时的统计数据")
+
+    # --- 最近请求记录 ---
+    st.markdown("### 最近请求记录 (过去24小时)")
+    recent_logs_data = get_recent_logs(limit=200)
+
+    if recent_logs_data and recent_logs_data.get("success") and recent_logs_data.get("logs"):
+        logs = recent_logs_data["logs"]
+        df_logs = pd.DataFrame(logs)
+        df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 重命名字段以便显示
+        df_logs.rename(columns={
+            'timestamp': '时间',
+            'model_name': '模型',
+            'tokens': 'Tokens',
+            'status': '状态',
+            'user_key_name': '用户'
+        }, inplace=True)
+
+        st.dataframe(
+            df_logs[['时间', '模型', 'Tokens', '状态', '用户']],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("暂无最近的请求记录")
 
 def render_key_management_page():
     st.title("密钥管理")
@@ -300,17 +402,30 @@ def render_key_management_page():
         st.markdown('<hr style="margin: 2rem 0;">', unsafe_allow_html=True)
 
         # 现有密钥
-        col1, col2, col3 = st.columns([4, 1, 1])
+        col1, col2, col3 = st.columns([4, 2.2, 1])
         with col1:
             st.markdown("#### 现有密钥")
         with col2:
-            if st.button("健康检测", help="检测所有密钥状态", key="health_check_gemini"):
-                with st.spinner("检测中..."):
-                    result = check_all_keys_health()
-                    st.success(result['message'])
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
+            b_col1, b_col2 = st.columns(2)
+            with b_col1:
+                if st.button("健康检测", help="检测所有密钥状态", key="health_check_gemini", use_container_width=True):
+                    with st.spinner("检测中..."):
+                        result = check_all_keys_health()
+                        st.success(result['message'])
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+            with b_col2:
+                if st.button("删除异常", help="一键删除所有健康状态为'异常'的密钥", key="delete_unhealthy_gemini", use_container_width=True):
+                    with st.spinner("正在删除..."):
+                        result = delete_unhealthy_gemini_keys()
+                        if result and result.get('success'):
+                            st.success(result.get('message', '成功删除异常密钥'))
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(result.get('message', '删除失败'))
         with col3:
             show_full_keys = st.checkbox("显示完整", key="show_gemini_full")
 
@@ -380,11 +495,18 @@ def render_key_management_page():
                                 ''', unsafe_allow_html=True)
 
                             with col3:
-                                st.markdown(f'''
-                                <span class="status-badge status-{key_info.get('health_status', 'unknown')}">
-                                    {format_health_status(key_info.get('health_status', 'unknown'))}
-                                </span>
-                                ''', unsafe_allow_html=True)
+                                if key_info.get("breaker_status") == "tripped":
+                                    st.markdown(f'''
+                                    <span class="status-badge status-tripped">
+                                        熔断
+                                    </span>
+                                    ''', unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f'''
+                                    <span class="status-badge status-{key_info.get('health_status', 'unknown')}">
+                                        {format_health_status(key_info.get('health_status', 'unknown'))}
+                                    </span>
+                                    ''', unsafe_allow_html=True)
 
                             with col4:
                                 st.markdown(f'''
@@ -398,7 +520,7 @@ def render_key_management_page():
                                 status = key_info.get('status', 0)
                                 if key_id is not None:
                                     toggle_text = "禁用" if status == 1 else "激活"
-                                    if st.button(toggle_text, key=f"toggle_g_{key_id}", width='stretch'):
+                                    if st.button(toggle_text, key=f"toggle_g_{key_id}", use_container_width=True):
                                         if toggle_key_status('gemini', key_id):
                                             st.success("状态已更新")
                                             st.cache_data.clear()
@@ -407,7 +529,7 @@ def render_key_management_page():
 
                             with col6:
                                 if key_id is not None:
-                                    if st.button("删除", key=f"del_g_{key_id}", width='stretch'):
+                                    if st.button("删除", key=f"del_g_{key_id}", use_container_width=True):
                                         if delete_key('gemini', key_id):
                                             st.success("删除成功")
                                             st.cache_data.clear()
@@ -500,16 +622,23 @@ response = client.chat.completions.create(
                             </div>
                             ''', unsafe_allow_html=True)
 
-                        with col3:
-                            st.markdown(f'''
-                            <span class="status-badge status-{'active' if key_info['status'] == 1 else 'inactive'}">
-                                {'激活' if key_info['status'] == 1 else '停用'}
-                            </span>
-                            ''', unsafe_allow_html=True)
+                            with col3:
+                                if key_info.get("breaker_status") == "tripped":
+                                    st.markdown(f'''
+                                    <span class="status-badge status-tripped">
+                                        熔断
+                                    </span>
+                                    ''', unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f'''
+                                    <span class="status-badge status-{key_info.get('health_status', 'unknown')}">
+                                        {format_health_status(key_info.get('health_status', 'unknown'))}
+                                    </span>
+                                    ''', unsafe_allow_html=True)
 
                         with col4:
                             toggle_text = "停用" if key_info['status'] == 1 else "激活"
-                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", width='stretch'):
+                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", use_container_width=True):
                                 if toggle_key_status('user', key_info['id']):
                                     st.success("状态已更新")
                                     st.cache_data.clear()
@@ -517,7 +646,7 @@ response = client.chat.completions.create(
                                     st.rerun()
 
                         with col5:
-                            if st.button("删除", key=f"del_u_{key_info['id']}", width='stretch'):
+                            if st.button("删除", key=f"del_u_{key_info['id']}", use_container_width=True):
                                 if delete_key('user', key_info['id']):
                                     st.success("删除成功")
                                     st.cache_data.clear()
@@ -591,7 +720,7 @@ def render_model_config_page():
                     key=f"status_{model}"
                 )
 
-            if st.form_submit_button("保存配置", type="primary", width='stretch'):
+            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 update_data = {
                     "single_api_rpm_limit": rpm,
                     "single_api_rpd_limit": rpd,
@@ -694,7 +823,7 @@ def render_system_settings_page():
             st.markdown("**配置说明**")
             st.info("思考模式会增加响应时间，但能显著提高复杂问题的回答质量。建议在需要深度分析的场景中启用。")
 
-            if st.form_submit_button("保存配置", type="primary", width='stretch'):
+            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 update_data = {
                     "enabled": thinking_enabled,
                     "budget": budget_options[budget_option],
@@ -791,7 +920,7 @@ def render_system_settings_page():
             if char_count > 0:
                 st.caption(f"当前字符数: {char_count}")
 
-            if st.form_submit_button("保存配置", type="primary", width='stretch'):
+            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 update_data = {
                     "enabled": inject_enabled,
                     "content": content,
@@ -875,7 +1004,7 @@ def render_system_settings_page():
                 )
     
 
-            if st.form_submit_button("保存配置", type="primary", width='stretch'):
+            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                 update_data_stream = {"mode": selected_mode}
                 update_data_gemini = {"mode": selected_stg_mode}
 
@@ -967,7 +1096,7 @@ def render_system_settings_page():
 
             st.markdown(f"**{strategy_options[strategy]}**: {strategy_descriptions[strategy]}")
 
-            if st.form_submit_button("保存策略", type="primary", width='stretch'):
+            if st.form_submit_button("保存策略", type="primary", use_container_width=True):
                 result = call_api('/admin/config/load-balance', 'POST', {
                     'load_balance_strategy': strategy
                 })
@@ -1041,7 +1170,7 @@ def render_system_settings_page():
                 save_config = st.form_submit_button(
                     "保存配置",
                     type="primary",
-                    width='stretch'
+                    use_container_width=True
                 )
 
                 # 处理表单提交
@@ -1253,13 +1382,13 @@ def render_system_settings_page():
                     save_config = st.form_submit_button(
                         "保存配置",
                         type="primary",
-                        width='stretch'
+                        use_container_width=True
                     )
 
                 with col2:
                     manual_cleanup = st.form_submit_button(
                         "立即执行清理",
-                        width='stretch'
+                        use_container_width=True
                     )
 
                 # 处理表单提交
@@ -1394,7 +1523,7 @@ def render_system_settings_page():
                     help="只有当消息token数超过此阈值时才应用防检测处理"
                 )
 
-                if st.form_submit_button("保存配置", type="primary", width='stretch'):
+                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                     update_data = {
                         'enabled': enabled,
                         'disable_for_tools': disable_for_tools,
@@ -1441,7 +1570,7 @@ def render_system_settings_page():
             with st.form("anti_trunc_form"):
                 enable_trunc = st.checkbox("启用防截断功能", value=current_enabled)
 
-                if st.form_submit_button("保存配置", type="primary", width='stretch'):
+                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
                     res = call_api('/admin/config/anti-truncation', 'POST', data={'enabled': enable_trunc})
                     if res and res.get('success'):
                         st.success("防截断配置已更新")
@@ -1501,7 +1630,7 @@ def render_system_settings_page():
                 help="开启后将注入加密指令并自动解密响应，可能会增加延迟并影响流式输出。"
             )
 
-            submitted = st.form_submit_button("应用设置", type="primary", width='stretch')
+            submitted = st.form_submit_button("应用设置", type="primary", use_container_width=True)
 
             if submitted:
                 with st.spinner("正在应用配置..."):

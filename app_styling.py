@@ -1130,10 +1130,16 @@ def apply_styling():
         border-color: rgba(239, 68, 68, 0.3);
     }
 
-    .status-unknown {
+    .status-tripped {
         background: rgba(245, 158, 11, 0.15);
         color: #92400e;
         border-color: rgba(245, 158, 11, 0.3);
+    }
+
+    .status-unknown {
+        background: rgba(107, 114, 128, 0.15);
+        color: #374151;
+        border-color: rgba(107, 114, 128, 0.3);
     }
 
     .status-active {

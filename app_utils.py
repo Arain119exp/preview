@@ -215,6 +215,13 @@ def toggle_key_status(key_type: str, key_id: int) -> bool:
     return result and result.get('success', False)
 
 
+def delete_unhealthy_gemini_keys() -> Optional[Dict]:
+    """一键删除所有异常的Gemini密钥"""
+    endpoint = '/admin/keys/gemini/unhealthy'
+    result = call_api(endpoint, 'DELETE', timeout=60)
+    return result
+
+
 def get_health_status_color(health_status: str) -> str:
     """获取健康状态颜色"""
     status_colors = {
@@ -230,6 +237,8 @@ def format_health_status(health_status: str) -> str:
     status_map = {
         'healthy': '正常',
         'unhealthy': '异常',
+        'rate_limited': '限速',
+        'tripped': '熔断',
         'unknown': '未知'
     }
     return status_map.get(health_status, health_status)
@@ -250,3 +259,15 @@ def get_service_status():
     except:
         pass
     return {'online': False, 'active_keys': 0, 'healthy_keys': 0}
+
+
+@st.cache_data(ttl=60)
+def get_hourly_stats():
+    """获取过去24小时的每小时统计数据"""
+    return call_api('/admin/stats/hourly')
+
+
+@st.cache_data(ttl=60)
+def get_recent_logs(limit: int = 100):
+    """获取最近的请求日志"""
+    return call_api(f'/admin/logs/recent?limit={limit}')

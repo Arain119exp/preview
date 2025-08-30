@@ -21,16 +21,74 @@ logger = logging.getLogger(__name__)
 _rr_counter = itertools.count()
 _rr_lock = asyncio.Lock()
 
-async def update_key_performance_background(db: Database, key_id: int, success: bool, response_time: float):
+async def update_key_performance_background(db: Database, key_id: int, success: bool, response_time: float, error_type: str = None):
     """
-    在后台异步更新key性能指标，不阻塞主请求流程
+    在后台异步更新key性能指标，并实现熔断器逻辑，不阻塞主请求流程
     """
     try:
-        db.update_key_performance(key_id, success, response_time)
+        key_info = db.get_gemini_key_by_id(key_id)
+        if not key_info:
+            return
 
-        # 如果失败，启动后台健康检测任务
-        if not success:
+        # EMA (Exponential Moving Average) a平滑因子
+        alpha = 0.1  # 对新数据给予10%的权重
+
+        # 更新EMA指标
+        new_ema_success_rate = key_info['ema_success_rate'] * (1 - alpha) + (1 if success else 0) * alpha
+        
+        # 仅在成功时更新响应时间EMA
+        new_ema_response_time = key_info['ema_response_time']
+        if success:
+            if key_info['ema_response_time'] == 0:
+                 new_ema_response_time = response_time
+            else:
+                new_ema_response_time = key_info['ema_response_time'] * (1 - alpha) + response_time * alpha
+
+        update_data = {
+            "ema_success_rate": new_ema_success_rate,
+            "ema_response_time": new_ema_response_time
+        }
+
+        current_time = int(time.time())
+
+        if success:
+            # 成功则重置失败计数和熔断状态
+            update_data["consecutive_failures"] = 0
+            update_data["breaker_status"] = "active"
+            update_data["health_status"] = "healthy"
+        else:
+            # --- 熔断器逻辑 ---
+            # 熔断窗口设为60秒
+            breaker_window = 60
+            # 熔断阈值设为2次
+            breaker_threshold = 2
+
+            last_failure = key_info.get('last_failure_timestamp', 0)
+            consecutive_failures = key_info.get('consecutive_failures', 0)
+
+            if current_time - last_failure < breaker_window:
+                consecutive_failures += 1
+            else:
+                # 超出时间窗口，重置连续失败计数
+                consecutive_failures = 1
+            
+            update_data["consecutive_failures"] = consecutive_failures
+            update_data["last_failure_timestamp"] = current_time
+
+            if consecutive_failures >= breaker_threshold:
+                update_data["breaker_status"] = "tripped"
+                logger.warning(f"Circuit breaker tripped for key #{key_id} after {consecutive_failures} failures.")
+            
+            # --- 区分失败类型 ---
+            if error_type == "rate_limit":
+                update_data["health_status"] = "rate_limited"
+            else:
+                update_data["health_status"] = "unhealthy"
+
+            # 安排后台健康检查以实现自动恢复
             asyncio.create_task(schedule_health_check(db, key_id))
+
+        db.update_gemini_key(key_id, **update_data)
 
     except Exception as e:
         logger.error(f"Background performance update failed for key {key_id}: {e}")
@@ -73,12 +131,12 @@ async def schedule_health_check(db: Database, key_id: int):
         logger.error(f"Background health check failed for key {key_id}: {e}")
 
 
-async def log_usage_background(db: Database, gemini_key_id: int, user_key_id: int, model_name: str, requests: int, tokens: int):
+async def log_usage_background(db: Database, gemini_key_id: int, user_key_id: int, model_name: str, status: str, requests: int, tokens: int):
     """
     在后台异步记录使用量，不阻塞主请求流程
     """
     try:
-        db.log_usage(gemini_key_id, user_key_id, model_name, requests, tokens)
+        db.log_usage(gemini_key_id, user_key_id, model_name, status, requests, tokens)
     except Exception as e:
         logger.error(f"Background usage logging failed: {e}")
 
@@ -442,6 +500,7 @@ async def make_request_with_fast_failover(
                             key_info['id'],
                             user_key_info['id'],
                             model_name,
+                            'success',
                             1,
                             total_tokens
                         )
@@ -465,6 +524,7 @@ async def make_request_with_fast_failover(
                             key_info['id'],
                             user_key_info['id'],
                             model_name,
+                            'failure',
                             1,
                             0
                         )
@@ -782,6 +842,7 @@ async def stream_with_fast_failover(
                                 key_info['id'],
                                 user_key_info['id'],
                                 model_name,
+                                'success',
                                 1,
                                 total_tokens
                             )
@@ -807,6 +868,7 @@ async def stream_with_fast_failover(
                             key_info['id'],
                             user_key_info['id'],
                             model_name,
+                            'failure',
                             1,
                             0
                         )
@@ -942,16 +1004,30 @@ async def select_gemini_key_and_check_limits(db: Database, rate_limiter: RateLim
             idx = next(_rr_counter) % len(available_keys)
             selected_key = available_keys[idx]
     elif strategy == 'least_used':
-        selected_key = available_keys[0]
-    else:  # adaptive strategy
+        # 按总请求数排序（需要数据库支持）
+        sorted_keys = sorted(available_keys, key=lambda k: k.get('total_requests', 0))
+        selected_key = sorted_keys[0]
+    else:  # adaptive strategy (默认, 升级版)
         best_key = None
-        best_score = -1
+        best_score = -1.0
 
         for key_info in available_keys:
-            success_rate = key_info.get('success_rate', 1.0)
-            avg_response_time = key_info.get('avg_response_time', 0.0)
-            time_score = max(0, 1.0 - (avg_response_time / 10.0))
-            score = success_rate * 0.7 + time_score * 0.3
+            # 使用新的EMA指标
+            ema_success_rate = key_info.get('ema_success_rate', 1.0)
+            ema_response_time = key_info.get('ema_response_time', 0.0)
+
+            # 响应时间评分，10秒为基准，超过10秒评分为0
+            time_score = max(0.0, 1.0 - (ema_response_time / 10.0))
+            
+            # 最终评分：成功率权重70%，时间权重30%
+            score = ema_success_rate * 0.7 + time_score * 0.3
+            
+            # 增加近期失败惩罚
+            last_failure = key_info.get('last_failure_timestamp', 0)
+            time_since_failure = time.time() - last_failure
+            if time_since_failure < 300: # 5分钟内失败过
+                penalty = (300 - time_since_failure) / 300  # 惩罚力度随时间减小
+                score *= (1 - penalty * 0.5) # 最高惩罚50%的分数
 
             if score > best_score:
                 best_score = score
@@ -1138,6 +1214,7 @@ async def make_request_with_failover(
                         gemini_key_id=key_info['id'],
                         user_key_id=user_key_info['id'],
                         model_name=model_name,
+                        status='success',
                         requests=1,
                         tokens=total_tokens
                     )
@@ -1158,6 +1235,7 @@ async def make_request_with_failover(
                         gemini_key_id=key_info['id'],
                         user_key_id=user_key_info['id'],
                         model_name=model_name,
+                        status='failure',
                         requests=1,
                         tokens=0
                     )
@@ -1264,6 +1342,7 @@ async def stream_with_failover(
                             gemini_key_id=key_info['id'],
                             user_key_id=user_key_info['id'],
                             model_name=model_name,
+                            status='success',
                             requests=1,
                             tokens=total_tokens
                         )
@@ -1284,6 +1363,7 @@ async def stream_with_failover(
                         gemini_key_id=key_info['id'],
                         user_key_id=user_key_info['id'],
                         model_name=model_name,
+                        status='failure',
                         requests=1,
                         tokens=0
                     )
@@ -1752,3 +1832,41 @@ async def auto_cleanup_failed_keys(db: Database):
 
     except Exception as e:
         logger.error(f"❌ Auto cleanup failed: {e}")
+
+
+def delete_unhealthy_keys(db: Database) -> Dict[str, Any]:
+    """删除所有异常的Gemini密钥"""
+    try:
+        unhealthy_keys = db.get_unhealthy_gemini_keys()
+        if not unhealthy_keys:
+            return {"success": True, "message": "没有发现异常密钥", "deleted_count": 0}
+
+        deleted_count = 0
+        for key in unhealthy_keys:
+            db.delete_gemini_key(key['id'])
+            deleted_count += 1
+        
+        logger.info(f"Deleted {deleted_count} unhealthy Gemini keys.")
+        return {"success": True, "message": f"成功删除 {deleted_count} 个异常密钥", "deleted_count": deleted_count}
+    except Exception as e:
+        logger.error(f"Error deleting unhealthy keys: {e}")
+        raise HTTPException(status_code=500, detail="删除异常密钥时发生内部错误")
+
+
+async def cleanup_database_records(db: Database):
+    """每日自动清理旧的数据库记录"""
+    try:
+        logger.info("Starting daily database cleanup...")
+        
+        # 清理使用日志
+        deleted_logs = db.cleanup_old_logs(days=1)
+        logger.info(f"Cleaned up {deleted_logs} old usage log records.")
+        
+        # 清理健康检查历史
+        deleted_history = db.cleanup_old_health_history(days=1)
+        logger.info(f"Cleaned up {deleted_history} old health history records.")
+        
+        logger.info("✅ Daily database cleanup completed.")
+        
+    except Exception as e:
+        logger.error(f"❌ Daily database cleanup failed: {e}")

@@ -72,7 +72,11 @@ class Database:
                     total_requests INTEGER DEFAULT 0,
                     successful_requests INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    breaker_status TEXT DEFAULT 'active' NOT NULL,
+                    last_failure_timestamp INTEGER DEFAULT 0 NOT NULL,
+                    ema_success_rate REAL DEFAULT 1.0 NOT NULL,
+                    ema_response_time REAL DEFAULT 0.0 NOT NULL
                 )
             ''')
 
@@ -129,6 +133,7 @@ class Database:
                     model_name TEXT,
                     requests INTEGER DEFAULT 0,
                     tokens INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'success',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (gemini_key_id) REFERENCES gemini_keys (id),
                     FOREIGN KEY (user_key_id) REFERENCES user_keys (id)
@@ -181,6 +186,21 @@ class Database:
                 cursor.execute("ALTER TABLE gemini_keys ADD COLUMN total_requests INTEGER DEFAULT 0")
             if 'successful_requests' not in columns:
                 cursor.execute("ALTER TABLE gemini_keys ADD COLUMN successful_requests INTEGER DEFAULT 0")
+            if 'breaker_status' not in columns:
+                cursor.execute("ALTER TABLE gemini_keys ADD COLUMN breaker_status TEXT DEFAULT 'active' NOT NULL")
+            if 'last_failure_timestamp' not in columns:
+                cursor.execute("ALTER TABLE gemini_keys ADD COLUMN last_failure_timestamp INTEGER DEFAULT 0 NOT NULL")
+            if 'ema_success_rate' not in columns:
+                cursor.execute("ALTER TABLE gemini_keys ADD COLUMN ema_success_rate REAL DEFAULT 1.0 NOT NULL")
+            if 'ema_response_time' not in columns:
+                cursor.execute("ALTER TABLE gemini_keys ADD COLUMN ema_response_time REAL DEFAULT 0.0 NOT NULL")
+
+            # 检查usage_logs表是否有status字段
+            cursor.execute("PRAGMA table_info(usage_logs)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'status' not in columns:
+                cursor.execute("ALTER TABLE usage_logs ADD COLUMN status TEXT DEFAULT 'success'")
+
 
             # 检查model_configs表结构
             cursor.execute("PRAGMA table_info(model_configs)")
@@ -253,7 +273,7 @@ class Database:
             # 思考功能配置
             ('thinking_enabled', 'true', '是否启用思考功能'),
             ('thinking_budget', '-1', '思考预算（token数）：-1=自动，0=禁用，1-32768=固定预算'),
-            ('include_thoughts', 'false', '是否在响应中包含思考过程'),
+            ('include_thoughts', 'true', '是否在响应中包含思考过程'),
 
             # 注入prompt配置
             ('inject_prompt_enabled', 'false', '是否启用注入prompt'),
@@ -722,7 +742,8 @@ class Database:
         try:
             allowed_fields = ['status', 'health_status', 'consecutive_failures',
                               'last_check_time', 'success_rate', 'avg_response_time',
-                              'total_requests', 'successful_requests']
+                              'total_requests', 'successful_requests', 'breaker_status',
+                              'last_failure_timestamp', 'ema_success_rate', 'ema_response_time']
             fields = []
             values = []
 
@@ -770,25 +791,28 @@ class Database:
             return []
 
     def get_available_gemini_keys(self) -> List[Dict]:
-        """获取所有可用的Gemini Keys"""
+        """获取所有可用的Gemini Keys (排除了熔断的key)"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""                SELECT id, key, health_status, success_rate, avg_response_time
-                FROM gemini_keys 
-                WHERE status = 1
-                ORDER BY 
-                    CASE health_status
-                        WHEN 'healthy' THEN 1
-                        WHEN 'untested' THEN 2
-                        WHEN 'rate_limited' THEN 3
-                        ELSE 4
-                    END, 
-                    success_rate DESC, 
-                    avg_response_time ASC
-            """)
-                keys = cursor.fetchall()
-                return [{'id': k[0], 'key': k[1], 'health_status': k[2]} for k in keys]
+                # 增加了 breaker_status != 'tripped' 的过滤条件
+                # 增加了 ema_success_rate 和 ema_response_time 用于排序和返回
+                cursor.execute("""
+                    SELECT id, key, health_status, success_rate, avg_response_time, 
+                           ema_success_rate, ema_response_time, consecutive_failures, last_failure_timestamp
+                    FROM gemini_keys 
+                    WHERE status = 1 AND breaker_status != 'tripped'
+                    ORDER BY 
+                        CASE health_status
+                            WHEN 'healthy' THEN 1
+                            WHEN 'untested' THEN 2
+                            WHEN 'rate_limited' THEN 3
+                            ELSE 4
+                        END, 
+                        ema_success_rate DESC, 
+                        ema_response_time ASC
+                """)
+                return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Failed to get available Gemini keys: {e}")
             return []
@@ -1311,15 +1335,15 @@ class Database:
             return {'daily_stats': [], 'total_stats': {'total_requests': 0, 'total_tokens': 0}}
 
     # 使用记录管理
-    def log_usage(self, gemini_key_id: int, user_key_id: int, model_name: str, requests: int = 1, tokens: int = 0):
+    def log_usage(self, gemini_key_id: int, user_key_id: int, model_name: str, status: str = 'success', requests: int = 1, tokens: int = 0):
         """记录使用量（按模型）"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO usage_logs (gemini_key_id, user_key_id, model_name, requests, tokens)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (gemini_key_id, user_key_id, model_name, requests, tokens))
+                    INSERT INTO usage_logs (gemini_key_id, user_key_id, model_name, status, requests, tokens)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (gemini_key_id, user_key_id, model_name, status, requests, tokens))
                 conn.commit()
         except Exception as e:
             logger.error(f"Failed to log usage: {e}")
@@ -1372,6 +1396,49 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to get all usage stats: {e}")
             return {}
+
+    def get_hourly_stats_for_last_24_hours(self) -> List[Dict]:
+        """获取过去24小时每小时的请求统计"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) as failed_requests
+                    FROM usage_logs
+                    WHERE timestamp >= datetime('now', '-24 hours')
+                    GROUP BY hour
+                    ORDER BY hour
+                ''')
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get hourly stats: {e}")
+            return []
+
+    def get_recent_usage_logs(self, limit: int = 100) -> List[Dict]:
+        """获取最近的使用记录"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        ul.timestamp,
+                        ul.model_name,
+                        ul.tokens,
+                        ul.status,
+                        uk.name as user_key_name
+                    FROM usage_logs ul
+                    LEFT JOIN user_keys uk ON ul.user_key_id = uk.id
+                    WHERE ul.timestamp >= datetime('now', '-24 hours')
+                    ORDER BY ul.timestamp DESC
+                    LIMIT ?
+                ''', (limit,))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get recent usage logs: {e}")
+            return []
 
     def get_model_usage_rate(self, model_name: str) -> float:
         """获取模型使用率（基于RPM）"""
@@ -1430,7 +1497,7 @@ class Database:
 
         return stats
 
-    def cleanup_old_logs(self, days: int = 30) -> int:
+    def cleanup_old_logs(self, days: int = 1) -> int:
         """清理旧的使用日志"""
         try:
             cutoff_date = datetime.now() - timedelta(days=days)
@@ -1449,7 +1516,7 @@ class Database:
             logger.error(f"Failed to cleanup old logs: {e}")
             return 0
 
-    def cleanup_old_health_history(self, days: int = 90) -> int:
+    def cleanup_old_health_history(self, days: int = 1) -> int:
         """清理旧的健康检测历史"""
         try:
             cutoff_date = datetime.now() - timedelta(days=days)

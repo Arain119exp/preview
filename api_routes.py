@@ -20,7 +20,8 @@ from api_services import (make_request_with_failover,
                           make_request_with_fast_failover,
                           should_use_fast_failover,
                           stream_non_stream_keep_alive,
-                          stream_with_failover, stream_with_fast_failover)
+                          stream_with_failover, stream_with_fast_failover,
+                          delete_unhealthy_keys)
 from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
                        delete_file_from_gemini, get_actual_model_name,
                        inject_prompt_to_messages, openai_to_gemini,
@@ -541,6 +542,12 @@ async def delete_gemini_key_endpoint(key_id: int, db: Database = Depends(get_db)
         return {"success": True, "message": "Key deleted"}
     raise HTTPException(404, "Key not found")
 
+
+@admin_router.delete("/keys/gemini/unhealthy", summary="删除所有异常的Gemini密钥")
+async def delete_unhealthy_keys_endpoint(db: Database = Depends(get_db)):
+    result = delete_unhealthy_keys(db)
+    return result
+
 @admin_router.post("/keys/gemini/{key_id}/toggle", summary="切换Gemini密钥状态")
 async def toggle_gemini_key_status_endpoint(key_id: int, db: Database = Depends(get_db)):
     if db.toggle_gemini_key_status(key_id):
@@ -663,3 +670,22 @@ async def get_admin_stats_endpoint(db: Database = Depends(get_db), anti_detectio
         "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
         "failover_config": db.get_failover_config()
     }
+
+
+@admin_router.get("/stats/hourly", summary="获取过去24小时每小时的统计数据")
+async def get_hourly_stats(db: Database = Depends(get_db)):
+    try:
+        stats = db.get_hourly_stats_for_last_24_hours()
+        return {"success": True, "stats": stats}
+    except Exception as e:
+        logger.error(f"Failed to get hourly stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve hourly stats")
+
+@admin_router.get("/logs/recent", summary="获取最近的请求日志")
+async def get_recent_logs(limit: int = 100, db: Database = Depends(get_db)):
+    try:
+        logs = db.get_recent_usage_logs(limit=limit)
+        return {"success": True, "logs": logs}
+    except Exception as e:
+        logger.error(f"Failed to get recent logs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve recent logs")

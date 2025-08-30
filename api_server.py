@@ -13,7 +13,7 @@ from database import Database
 from api_routes import router as api_router, admin_router
 from dependencies import get_db, get_start_time, get_request_count, get_keep_alive_enabled, get_anti_detection, get_rate_limiter
 from api_utils import GeminiAntiDetectionInjector, keep_alive_ping, RateLimitCache
-from api_services import record_hourly_health_check, auto_cleanup_failed_keys
+from api_services import record_hourly_health_check, auto_cleanup_failed_keys, cleanup_database_records
 
 # Configure logging
 logging.basicConfig(
@@ -64,6 +64,12 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             auto_cleanup_failed_keys, 'cron', hour=2, minute=0,
             id='daily_cleanup', max_instances=1, coalesce=True,
+            kwargs={'db': db}
+        )
+        
+        scheduler.add_job(
+            cleanup_database_records, 'cron', hour=3, minute=0,
+            id='daily_db_cleanup', max_instances=1, coalesce=True,
             kwargs={'db': db}
         )
         
