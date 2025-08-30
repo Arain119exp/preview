@@ -121,30 +121,23 @@ async def collect_gemini_response_directly(
     saw_finish_tag = False
     start_time = time.time()
 
+    client = get_cached_client(gemini_key)
     try:
-        client = get_cached_client(gemini_key)
         if use_stream:
-            # 使用 google-genai 的流式接口，并在每个 chunk 间重置超时计时
+            # 使用 google-genai 的流式接口
             genai_stream = await client.aio.models.generate_content_stream(
                 model=model_name,
                 contents=gemini_request["contents"],
                 config=gemini_request.get("generation_config")
             )
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(genai_stream.__anext__(), timeout)
-                except StopAsyncIteration:
-                    break
-                # chunk.candidates 列表结构与 REST 回包保持一致
-                # SDK 对象转为 dict，字段与官方 REST 保持同名，兼容新旧版本 SDK
+            async for chunk in genai_stream:
                 data = chunk.to_dict() if hasattr(chunk, "to_dict") else json.loads(chunk.model_dump_json())
                 for candidate in data.get("candidates", []):
                     content_data = candidate.get("content", {})
                     parts = content_data.get("parts", [])
                     for part in parts:
                         text = part.get("text", "")
-                        if not text:
-                            continue
+                        if not text: continue
                         total_tokens += len(text.split())
                         is_thought = part.get("thought", False)
                         if is_thought:
@@ -153,59 +146,40 @@ async def collect_gemini_response_directly(
                             complete_content += text
                     finish_reason_raw = candidate.get("finishReason", "stop")
                     finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
-
                     processed_lines += 1
-
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(db, key_id, True, response_time)
-                )
+            response_time = time.time() - start_time
+            asyncio.create_task(update_key_performance_background(db, key_id, True, response_time))
+        else:
+            # 非流式直接调用
+            response_obj = await client.aio.models.generate_content(
+                model=model_name,
+                contents=gemini_request["contents"],
+                config=gemini_request.get("generation_config")
+            )
+            data = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
+            for candidate in data.get("candidates", []):
+                finish_reason_raw = candidate.get("finishReason", "stop")
+                finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
+                for part in candidate.get("content", {}).get("parts", []):
+                    text = part.get("text", "")
+                    if text:
+                        complete_content += text
+                        total_tokens += len(text.split())
+            response_time = time.time() - start_time
+            asyncio.create_task(update_key_performance_background(db, key_id, True, response_time))
 
     except asyncio.TimeoutError as e:
         logger.warning(f"Direct request timeout/connection error: {str(e)}")
         response_time = time.time() - start_time
-        asyncio.create_task(
-            update_key_performance_background(db, key_id, False, response_time)
-        )
-        raise Exception(f"Direct request failed: {str(e)}")
-
+        asyncio.create_task(update_key_performance_background(db, key_id, False, response_time))
+        raise Exception(f"Direct request failed: {str(e)}") from e
     except Exception as e:
         logger.error(f"Unexpected direct request error: {str(e)}")
         response_time = time.time() - start_time
-        asyncio.create_task(
-            update_key_performance_background(db, key_id, False, response_time)
-        )
+        asyncio.create_task(update_key_performance_background(db, key_id, False, response_time))
         raise
 
-    else:
-            # 非流式直接调用
-            try:
-                response_obj = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=gemini_request["contents"],
-                    config=gemini_request.get("generation_config")
-                )
-                data = response_obj.to_dict() if hasattr(response_obj, "to_dict") else json.loads(response_obj.model_dump_json())
-                for candidate in data.get("candidates", []):
-                    finish_reason_raw = candidate.get("finishReason", "stop")
-                    finish_reason = map_finish_reason(finish_reason_raw) if finish_reason_raw else "stop"
-                    for part in candidate.get("content", {}).get("parts", []):
-                        text = part.get("text", "")
-                        if text:
-                            complete_content += text
-                            total_tokens += len(text.split())
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(db, key_id, True, response_time)
-                )
-            except Exception as e:
-                response_time = time.time() - start_time
-                asyncio.create_task(
-                    update_key_performance_background(db, key_id, False, response_time)
-                )
-                raise
-
-        # 检查是否收集到内容
+    # 检查是否收集到内容
     if not complete_content.strip():
         logger.error(f"No content collected directly. Processed {processed_lines} lines")
         raise HTTPException(
