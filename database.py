@@ -851,6 +851,17 @@ class Database:
             logger.error(f"Failed to get healthy Gemini keys: {e}")
             return []
 
+    def get_unhealthy_gemini_keys(self) -> List[Dict]:
+        """获取所有异常的Gemini Keys"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM gemini_keys WHERE health_status = 'unhealthy' AND status = 1")
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get unhealthy Gemini keys: {e}")
+            return []
+
     def toggle_gemini_key_status(self, key_id: int) -> bool:
         """切换Gemini Key状态"""
         try:
@@ -929,11 +940,7 @@ class Database:
                     health_status = 'healthy'
                 else:
                     consecutive_failures = row['consecutive_failures'] + 1
-                    failure_threshold = int(self.get_config('failure_threshold', '3'))
-                    if consecutive_failures >= failure_threshold:
-                        health_status = 'unhealthy'
-                    else:
-                        health_status = 'untested'
+                    health_status = 'unhealthy'
 
                 # 更新数据库
                 cursor.execute('''

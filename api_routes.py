@@ -538,17 +538,17 @@ async def add_gemini_key_endpoint(request: dict, db: Database = Depends(get_db))
             added_count += 1
     return {"success": True, "message": f"Added {added_count} keys."}
 
+@admin_router.delete("/keys/gemini/unhealthy", summary="删除所有异常的Gemini密钥")
+async def delete_unhealthy_keys_endpoint(db: Database = Depends(get_db)):
+    result = delete_unhealthy_keys(db)
+    return result
+
+
 @admin_router.delete("/keys/gemini/{key_id}", summary="删除Gemini密钥")
 async def delete_gemini_key_endpoint(key_id: int, db: Database = Depends(get_db)):
     if db.delete_gemini_key(key_id):
         return {"success": True, "message": "Key deleted"}
     raise HTTPException(404, "Key not found")
-
-
-@admin_router.delete("/keys/gemini/unhealthy", summary="删除所有异常的Gemini密钥")
-async def delete_unhealthy_keys_endpoint(db: Database = Depends(get_db)):
-    result = delete_unhealthy_keys(db)
-    return result
 
 @admin_router.post("/keys/gemini/{key_id}/toggle", summary="切换Gemini密钥状态")
 async def toggle_gemini_key_status_endpoint(key_id: int, db: Database = Depends(get_db)):
