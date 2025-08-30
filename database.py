@@ -120,7 +120,12 @@ class Database:
                     name TEXT,
                     status INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_used TIMESTAMP
+                    last_used TIMESTAMP,
+                    tpm_limit INTEGER DEFAULT -1,
+                    rpd_limit INTEGER DEFAULT -1,
+                    rpm_limit INTEGER DEFAULT -1,
+                    valid_until TIMESTAMP DEFAULT NULL,
+                    max_concurrency INTEGER DEFAULT -1
                 )
             ''')
 
@@ -200,6 +205,20 @@ class Database:
             columns = [column[1] for column in cursor.fetchall()]
             if 'status' not in columns:
                 cursor.execute("ALTER TABLE usage_logs ADD COLUMN status TEXT DEFAULT 'success'")
+
+            # 检查user_keys表是否有新字段
+            cursor.execute("PRAGMA table_info(user_keys)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'tpm_limit' not in columns:
+                cursor.execute("ALTER TABLE user_keys ADD COLUMN tpm_limit INTEGER DEFAULT -1")
+            if 'rpd_limit' not in columns:
+                cursor.execute("ALTER TABLE user_keys ADD COLUMN rpd_limit INTEGER DEFAULT -1")
+            if 'rpm_limit' not in columns:
+                cursor.execute("ALTER TABLE user_keys ADD COLUMN rpm_limit INTEGER DEFAULT -1")
+            if 'valid_until' not in columns:
+                cursor.execute("ALTER TABLE user_keys ADD COLUMN valid_until TIMESTAMP DEFAULT NULL")
+            if 'max_concurrency' not in columns:
+                cursor.execute("ALTER TABLE user_keys ADD COLUMN max_concurrency INTEGER DEFAULT -1")
 
 
             # 检查model_configs表结构
@@ -1269,7 +1288,7 @@ class Database:
     def update_user_key(self, key_id: int, **kwargs) -> bool:
         """更新用户Key信息"""
         try:
-            allowed_fields = ['name', 'status']
+            allowed_fields = ['name', 'status', 'tpm_limit', 'rpd_limit', 'rpm_limit', 'valid_until', 'max_concurrency']
             fields = []
             values = []
 

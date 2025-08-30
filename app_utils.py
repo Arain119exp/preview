@@ -215,6 +215,13 @@ def toggle_key_status(key_type: str, key_id: int) -> bool:
     return result and result.get('success', False)
 
 
+def update_user_key_config(key_id: int, config_data: Dict) -> bool:
+    """更新用户密钥配置"""
+    endpoint = f'/admin/keys/user/{key_id}/config'
+    result = call_api(endpoint, 'POST', data=config_data)
+    return result and result.get('success', False)
+
+
 def delete_unhealthy_gemini_keys() -> Optional[Dict]:
     """一键删除所有异常的Gemini密钥"""
     endpoint = '/admin/keys/gemini/unhealthy'
@@ -232,16 +239,15 @@ def get_health_status_color(health_status: str) -> str:
     return status_colors.get(health_status, '#6b7280')  # 默认灰色
 
 
-def format_health_status(health_status: str) -> str:
-    """格式化健康状态显示"""
+def format_health_status(status):
     status_map = {
-        'healthy': '正常',
+        'healthy': '健康',
         'unhealthy': '异常',
-        'rate_limited': '限速',
-        'tripped': '熔断',
-        'unknown': '未知'
+        'unknown': '未知',
+        'rate_limited': '速率限制',
+        'auto_removed': '自动移除'
     }
-    return status_map.get(health_status, health_status)
+    return status_map.get(status, '未知')
 
 # --- 获取服务状态函数 ---
 @st.cache_data(ttl=10)

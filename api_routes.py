@@ -578,6 +578,12 @@ async def toggle_user_key_status_endpoint(key_id: int, db: Database = Depends(ge
         return {"success": True, "message": "Status toggled"}
     raise HTTPException(404, "Key not found")
 
+@admin_router.post("/keys/user/{key_id}/config", summary="更新用户密钥配置")
+async def update_user_key_config_endpoint(key_id: int, request: dict, db: Database = Depends(get_db)):
+    if db.update_user_key(key_id, **request):
+        return {"success": True, "message": "Config updated"}
+    raise HTTPException(404, "Key not found")
+
 @admin_router.get("/models", summary="列出所有模型配置")
 async def list_model_configs_endpoint(db: Database = Depends(get_db)):
     return {"success": True, "models": db.get_all_model_configs()}

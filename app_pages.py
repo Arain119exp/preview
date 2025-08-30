@@ -421,31 +421,32 @@ def render_key_management_page():
         st.markdown('<hr style="margin: 2rem 0;">', unsafe_allow_html=True)
 
         # 现有密钥
-        col1, col2, col3 = st.columns([4, 2.2, 1])
+        col1, col2, col3, col4 = st.columns([4, 1.5, 1.5, 1])
         with col1:
             st.markdown("#### 现有密钥")
         with col2:
-            b_col1, b_col2 = st.columns(2)
-            with b_col1:
-                if st.button("健康检测", help="检测所有密钥状态", key="health_check_gemini", use_container_width=True):
-                    with st.spinner("检测中..."):
-                        result = check_all_keys_health()
-                        st.success(result['message'])
+            if st.button("健康检测", help="检测所有密钥状态", key="health_check_gemini", use_container_width=True):
+                with st.spinner("检测中..."):
+                    result = check_all_keys_health()
+                    st.success(result['message'])
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+        with col3:
+            if st.button("删除异常", help="一键删除所有健康状态为'异常'的密钥", key="delete_unhealthy_gemini", use_container_width=True):
+                with st.spinner("正在删除..."):
+                    result = delete_unhealthy_gemini_keys()
+                    if result and result.get('success'):
+                        st.success(result.get('message', '成功删除异常密钥'))
                         st.cache_data.clear()
                         time.sleep(1)
                         st.rerun()
-            with b_col2:
-                if st.button("删除异常", help="一键删除所有健康状态为'异常'的密钥", key="delete_unhealthy_gemini", use_container_width=True):
-                    with st.spinner("正在删除..."):
-                        result = delete_unhealthy_gemini_keys()
-                        if result and result.get('success'):
-                            st.success(result.get('message', '成功删除异常密钥'))
-                            st.cache_data.clear()
-                            time.sleep(1)
-                            st.rerun()
-                        else:
+                    else:
+                        if result:
                             st.error(result.get('message', '删除失败'))
-        with col3:
+                        else:
+                            st.error("删除失败，未收到服务响应")
+        with col4:
             show_full_keys = st.checkbox("显示完整", key="show_gemini_full")
 
         # 获取密钥列表
@@ -642,35 +643,52 @@ response = client.chat.completions.create(
                             ''', unsafe_allow_html=True)
 
                             with col3:
-                                if key_info.get("breaker_status") == "tripped":
-                                    st.markdown(f'''
-                                    <span class="status-badge status-tripped">
-                                        熔断
-                                    </span>
-                                    ''', unsafe_allow_html=True)
-                                else:
-                                    st.markdown(f'''
-                                    <span class="status-badge status-{key_info.get('health_status', 'unknown')}">
-                                        {format_health_status(key_info.get('health_status', 'unknown'))}
-                                    </span>
-                                    ''', unsafe_allow_html=True)
+                                st.markdown(f'''
+                                <span class="status-badge status-{'active' if key_info.get('status', 0) == 1 else 'inactive'}">
+                                    {'激活' if key_info.get('status', 0) == 1 else '禁用'}
+                                </span>
+                                ''', unsafe_allow_html=True)
 
-                        with col4:
-                            toggle_text = "停用" if key_info['status'] == 1 else "激活"
-                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", use_container_width=True):
-                                if toggle_key_status('user', key_info['id']):
-                                    st.success("状态已更新")
-                                    st.cache_data.clear()
-                                    time.sleep(1)
-                                    st.rerun()
+                            with col4:
+                                toggle_text = "停用" if key_info['status'] == 1 else "激活"
+                                if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", use_container_width=True):
+                                    if toggle_key_status('user', key_info['id']):
+                                        st.success("状态已更新")
+                                        st.cache_data.clear()
+                                        time.sleep(1)
+                                        st.rerun()
 
-                        with col5:
-                            if st.button("删除", key=f"del_u_{key_info['id']}", use_container_width=True):
-                                if delete_key('user', key_info['id']):
-                                    st.success("删除成功")
-                                    st.cache_data.clear()
-                                    time.sleep(1)
-                                    st.rerun()
+                            with col5:
+                                if st.button("删除", key=f"del_u_{key_info['id']}", use_container_width=True):
+                                    if delete_key('user', key_info['id']):
+                                        st.success("删除成功")
+                                        st.cache_data.clear()
+                                        time.sleep(1)
+                                        st.rerun()
+                        
+                        with st.expander("设置"):
+                            with st.form(f"user_key_config_{key_info['id']}"):
+                                tpm_limit = st.number_input("TPM", min_value=-1, value=key_info.get('tpm_limit', -1))
+                                rpd_limit = st.number_input("RPD", min_value=-1, value=key_info.get('rpd_limit', -1))
+                                rpm_limit = st.number_input("RPM", min_value=-1, value=key_info.get('rpm_limit', -1))
+                                valid_until = st.text_input("有效期", value=key_info.get('valid_until', ''))
+                                max_concurrency = st.number_input("最大并发数", min_value=-1, value=key_info.get('max_concurrency', -1))
+                                submitted = st.form_submit_button("保存")
+                                if submitted:
+                                    config_data = {
+                                        'tpm_limit': tpm_limit,
+                                        'rpd_limit': rpd_limit,
+                                        'rpm_limit': rpm_limit,
+                                        'valid_until': valid_until,
+                                        'max_concurrency': max_concurrency
+                                    }
+                                    if update_user_key_config(key_info['id'], config_data):
+                                        st.success("配置已更新")
+                                        st.cache_data.clear()
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error("配置更新失败")
 
             else:
                 st.info("暂无用户密钥")
