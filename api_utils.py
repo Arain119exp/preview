@@ -498,7 +498,8 @@ def openai_to_gemini(db: Database, request: ChatCompletionRequest, anti_detectio
     generation_config = types.GenerateContentConfig(
         temperature=request.temperature, top_p=request.top_p, candidate_count=request.n,
         thinking_config=thinking_cfg_obj, max_output_tokens=request.max_tokens,
-        stop_sequences=request.stop
+        stop_sequences=request.stop,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
     )
     
     gemini_request = {

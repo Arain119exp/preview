@@ -157,7 +157,7 @@ def render_dashboard_page():
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpm, use_container_width=True, config={
+                st.plotly_chart(fig_rpm, width='stretch', config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -197,7 +197,7 @@ def render_dashboard_page():
                     bargap=0.4,
                     margin=dict(l=0, r=0, t=50, b=0)
                 )
-                st.plotly_chart(fig_rpd, use_container_width=True, config={
+                st.plotly_chart(fig_rpd, width='stretch', config={
                     'displayModeBar': False,
                     'staticPlot': True,  # 禁用所有交互
                     'scrollZoom': False,
@@ -214,7 +214,7 @@ def render_dashboard_page():
                 display_df.columns = ['模型', '分钟请求', '分钟限制', '分钟使用率', '日请求', '日限制', '日使用率']
                 display_df['分钟使用率'] = display_df['分钟使用率'].apply(lambda x: f"{x:.1f}%")
                 display_df['日使用率'] = display_df['日使用率'].apply(lambda x: f"{x:.1f}%")
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
+                st.dataframe(display_df, width='stretch', hide_index=True)
     else:
         st.info("暂无使用数据")
 
@@ -398,7 +398,7 @@ def render_key_management_page():
                                 status = key_info.get('status', 0)
                                 if key_id is not None:
                                     toggle_text = "禁用" if status == 1 else "激活"
-                                    if st.button(toggle_text, key=f"toggle_g_{key_id}", use_container_width=True):
+                                    if st.button(toggle_text, key=f"toggle_g_{key_id}", width='stretch'):
                                         if toggle_key_status('gemini', key_id):
                                             st.success("状态已更新")
                                             st.cache_data.clear()
@@ -407,7 +407,7 @@ def render_key_management_page():
 
                             with col6:
                                 if key_id is not None:
-                                    if st.button("删除", key=f"del_g_{key_id}", use_container_width=True):
+                                    if st.button("删除", key=f"del_g_{key_id}", width='stretch'):
                                         if delete_key('gemini', key_id):
                                             st.success("删除成功")
                                             st.cache_data.clear()
@@ -509,7 +509,7 @@ response = client.chat.completions.create(
 
                         with col4:
                             toggle_text = "停用" if key_info['status'] == 1 else "激活"
-                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", use_container_width=True):
+                            if st.button(toggle_text, key=f"toggle_u_{key_info['id']}", width='stretch'):
                                 if toggle_key_status('user', key_info['id']):
                                     st.success("状态已更新")
                                     st.cache_data.clear()
@@ -517,7 +517,7 @@ response = client.chat.completions.create(
                                     st.rerun()
 
                         with col5:
-                            if st.button("删除", key=f"del_u_{key_info['id']}", use_container_width=True):
+                            if st.button("删除", key=f"del_u_{key_info['id']}", width='stretch'):
                                 if delete_key('user', key_info['id']):
                                     st.success("删除成功")
                                     st.cache_data.clear()
@@ -591,7 +591,7 @@ def render_model_config_page():
                     key=f"status_{model}"
                 )
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary", width='stretch'):
                 update_data = {
                     "single_api_rpm_limit": rpm,
                     "single_api_rpd_limit": rpd,
@@ -694,7 +694,7 @@ def render_system_settings_page():
             st.markdown("**配置说明**")
             st.info("思考模式会增加响应时间，但能显著提高复杂问题的回答质量。建议在需要深度分析的场景中启用。")
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary", width='stretch'):
                 update_data = {
                     "enabled": thinking_enabled,
                     "budget": budget_options[budget_option],
@@ -791,7 +791,7 @@ def render_system_settings_page():
             if char_count > 0:
                 st.caption(f"当前字符数: {char_count}")
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary", width='stretch'):
                 update_data = {
                     "enabled": inject_enabled,
                     "content": content,
@@ -875,7 +875,7 @@ def render_system_settings_page():
                 )
     
 
-            if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+            if st.form_submit_button("保存配置", type="primary", width='stretch'):
                 update_data_stream = {"mode": selected_mode}
                 update_data_gemini = {"mode": selected_stg_mode}
 
@@ -967,7 +967,7 @@ def render_system_settings_page():
 
             st.markdown(f"**{strategy_options[strategy]}**: {strategy_descriptions[strategy]}")
 
-            if st.form_submit_button("保存策略", type="primary", use_container_width=True):
+            if st.form_submit_button("保存策略", type="primary", width='stretch'):
                 result = call_api('/admin/config/load-balance', 'POST', {
                     'load_balance_strategy': strategy
                 })
@@ -1041,7 +1041,7 @@ def render_system_settings_page():
                 save_config = st.form_submit_button(
                     "保存配置",
                     type="primary",
-                    use_container_width=True
+                    width='stretch'
                 )
 
                 # 处理表单提交
@@ -1253,13 +1253,13 @@ def render_system_settings_page():
                     save_config = st.form_submit_button(
                         "保存配置",
                         type="primary",
-                        use_container_width=True
+                        width='stretch'
                     )
 
                 with col2:
                     manual_cleanup = st.form_submit_button(
                         "立即执行清理",
-                        use_container_width=True
+                        width='stretch'
                     )
 
                 # 处理表单提交
@@ -1394,7 +1394,7 @@ def render_system_settings_page():
                     help="只有当消息token数超过此阈值时才应用防检测处理"
                 )
 
-                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                if st.form_submit_button("保存配置", type="primary", width='stretch'):
                     update_data = {
                         'enabled': enabled,
                         'disable_for_tools': disable_for_tools,
@@ -1441,7 +1441,7 @@ def render_system_settings_page():
             with st.form("anti_trunc_form"):
                 enable_trunc = st.checkbox("启用防截断功能", value=current_enabled)
 
-                if st.form_submit_button("保存配置", type="primary", use_container_width=True):
+                if st.form_submit_button("保存配置", type="primary", width='stretch'):
                     res = call_api('/admin/config/anti-truncation', 'POST', data={'enabled': enable_trunc})
                     if res and res.get('success'):
                         st.success("防截断配置已更新")
@@ -1501,7 +1501,7 @@ def render_system_settings_page():
                 help="开启后将注入加密指令并自动解密响应，可能会增加延迟并影响流式输出。"
             )
 
-            submitted = st.form_submit_button("应用设置", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("应用设置", type="primary", width='stretch')
 
             if submitted:
                 with st.spinner("正在应用配置..."):
