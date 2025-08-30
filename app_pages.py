@@ -221,102 +221,121 @@ def render_dashboard_page():
     else:
         st.info("暂无使用数据")
 
-    # --- 过去24小时请求统计 ---
-    st.markdown("### 过去24小时请求统计")
+    # --- 最近请求统计 ---
+    st.markdown("### 最近请求统计")
     hourly_data = get_hourly_stats()
+
+    # 创建一个包含过去24小时的完整时间序列
+    now = pd.to_datetime('now', utc=True)
+    hours_24_ago = now - pd.Timedelta(hours=23)
+    full_hour_range = pd.date_range(start=hours_24_ago.floor('h'), end=now.floor('h'), freq='h')
+    df_full_range = pd.DataFrame(full_hour_range, columns=['hour'])
 
     if hourly_data and hourly_data.get("success") and hourly_data.get("stats"):
         stats = hourly_data["stats"]
         df_hourly = pd.DataFrame(stats)
         df_hourly['hour'] = pd.to_datetime(df_hourly['hour'])
+        
+        # 合并数据，填充缺失值
+        df_hourly = pd.merge(df_full_range, df_hourly, on='hour', how='left').fillna(0)
         df_hourly['failure_rate'] = (df_hourly['failed_requests'] / df_hourly['total_requests'] * 100).fillna(0)
-
-        fig = go.Figure()
-
-        # 添加总请求数折线
-        fig.add_trace(go.Scatter(
-            x=df_hourly['hour'],
-            y=df_hourly['total_requests'],
-            mode='lines+markers',
-            name='总请求数',
-            line=dict(color='rgba(99, 102, 241, 0.8)', width=2),
-            marker=dict(size=5)
-        ))
-
-        # 添加失败请求数折线
-        fig.add_trace(go.Scatter(
-            x=df_hourly['hour'],
-            y=df_hourly['failed_requests'],
-            mode='lines+markers',
-            name='失败数',
-            line=dict(color='rgba(239, 68, 68, 0.8)', width=2),
-            marker=dict(size=5)
-        ))
-
-        # 添加失败率折线 (在第二个y轴)
-        fig.add_trace(go.Scatter(
-            x=df_hourly['hour'],
-            y=df_hourly['failure_rate'],
-            mode='lines',
-            name='失败率 (%)',
-            line=dict(color='rgba(245, 158, 11, 0.7)', width=2, dash='dot'),
-            yaxis='y2'
-        ))
-
-        fig.update_layout(
-            height=400,
-            title_font=dict(size=16, color='#1f2937', family='-apple-system, BlinkMacSystemFont'),
-            plot_bgcolor='rgba(255, 255, 255, 0.3)',
-            paper_bgcolor='rgba(255, 255, 255, 0.3)',
-            font=dict(family='-apple-system, BlinkMacSystemFont', color='#374151', size=12),
-            xaxis=dict(gridcolor='rgba(107, 114, 128, 0.2)'),
-            yaxis=dict(
-                title='请求数',
-                gridcolor='rgba(107, 114, 128, 0.2)'
-            ),
-            yaxis2=dict(
-                title='失败率 (%)',
-                overlaying='y',
-                side='right',
-                showgrid=False,
-                range=[0, 100]
-            ),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            ),
-            margin=dict(l=0, r=0, t=50, b=0)
-        )
-        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("暂无过去24小时的统计数据")
+        # 如果没有数据，创建一个空的DataFrame
+        df_hourly = df_full_range.copy()
+        df_hourly['total_requests'] = 0
+        df_hourly['failed_requests'] = 0
+        df_hourly['failure_rate'] = 0
+
+    fig = go.Figure()
+
+    # 添加总请求数折线
+    fig.add_trace(go.Scatter(
+        x=df_hourly['hour'],
+        y=df_hourly['total_requests'],
+        mode='lines+markers',
+        name='总请求数',
+        line=dict(color='rgba(99, 102, 241, 0.8)', width=2),
+        marker=dict(size=5)
+    ))
+
+    # 添加失败请求数折线
+    fig.add_trace(go.Scatter(
+        x=df_hourly['hour'],
+        y=df_hourly['failed_requests'],
+        mode='lines+markers',
+        name='失败数',
+        line=dict(color='rgba(239, 68, 68, 0.8)', width=2),
+        marker=dict(size=5)
+    ))
+
+    # 添加失败率折线 (在第二个y轴)
+    fig.add_trace(go.Scatter(
+        x=df_hourly['hour'],
+        y=df_hourly['failure_rate'],
+        mode='lines',
+        name='失败率 (%)',
+        line=dict(color='rgba(245, 158, 11, 0.7)', width=2, dash='dot'),
+        yaxis='y2'
+    ))
+
+    fig.update_layout(
+        title=dict(text='每小时请求趋势', x=0.05, y=0.95, xanchor='left', yanchor='top'),
+        height=400,
+        title_font=dict(size=16, color='#1f2937', family='-apple-system, BlinkMacSystemFont'),
+        plot_bgcolor='rgba(255, 255, 255, 0.3)',
+        paper_bgcolor='rgba(255, 255, 255, 0.3)',
+        font=dict(family='-apple-system, BlinkMacSystemFont', color='#374151', size=12),
+        xaxis=dict(gridcolor='rgba(107, 114, 128, 0.2)'),
+        yaxis=dict(
+            title='请求数',
+            gridcolor='rgba(107, 114, 128, 0.2)'
+        ),
+        yaxis2=dict(
+            title='失败率 (%)',
+            overlaying='y',
+            side='right',
+            showgrid=False,
+            range=[0, 100]
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        margin=dict(l=0, r=0, t=80, b=0)
+    )
+    st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
 
     # --- 最近请求记录 ---
-    st.markdown("### 最近请求记录 (过去24小时)")
+    st.markdown("### 最近请求记录")
     recent_logs_data = get_recent_logs(limit=200)
 
     if recent_logs_data and recent_logs_data.get("success") and recent_logs_data.get("logs"):
-        logs = recent_logs_data["logs"]
-        df_logs = pd.DataFrame(logs)
-        df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # 重命名字段以便显示
-        df_logs.rename(columns={
-            'timestamp': '时间',
-            'model_name': '模型',
-            'tokens': 'Tokens',
-            'status': '状态',
-            'user_key_name': '用户'
-        }, inplace=True)
+        with st.expander("查看详细数据"):
+            logs = recent_logs_data["logs"]
+            df_logs = pd.DataFrame(logs)
+            df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 重命名字段以便显示
+            df_logs.rename(columns={
+                'timestamp': '时间',
+                'model_name': '模型',
+                'failover_attempts': '消耗次数',
+                'status': '状态',
+                'user_key_name': '用户'
+            }, inplace=True)
 
-        st.dataframe(
-            df_logs[['时间', '模型', 'Tokens', '状态', '用户']],
-            use_container_width=True,
-            hide_index=True
-        )
+            # 确保 '消耗次数' 列存在
+            if '消耗次数' not in df_logs.columns:
+                df_logs['消耗次数'] = 1 # 如果没有该字段，默认为1
+
+            st.dataframe(
+                df_logs[['时间', '模型', '消耗次数', '状态', '用户']],
+                use_container_width=True,
+                hide_index=True
+            )
     else:
         st.info("暂无最近的请求记录")
 

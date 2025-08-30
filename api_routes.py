@@ -381,6 +381,8 @@ async def check_all_keys_health_endpoint(db: Database = Depends(get_db)):
     for key, result in zip(active_keys, results):
         db.update_key_performance(key['id'], result['healthy'], result['response_time'])
         db.record_daily_health_status(key['id'], result['healthy'], result['response_time'])
+        status_code = result.get('status_code', 'N/A')
+        logger.info(f"密钥 #{key['id']} 状态：{status_code}")
         if result['healthy']:
             healthy_count += 1
         output_results.append({"key_id": key['id'], **result})

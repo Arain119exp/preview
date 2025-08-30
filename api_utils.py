@@ -182,7 +182,15 @@ async def check_gemini_key_health(api_key: str, timeout: int = 10) -> Dict[str, 
     except asyncio.TimeoutError:
         return {"healthy": False, "response_time": timeout, "status_code": None, "error": "Timeout"}
     except Exception as e:
-        return {"healthy": False, "response_time": time.time() - start_time, "status_code": None, "error": str(e)}
+        status_code = None
+        error_message = str(e)
+        # Try to extract HTTP status code from the exception message
+        import re
+        match = re.match(r"(\d{3})", error_message)
+        if match:
+            status_code = int(match.group(1))
+        
+        return {"healthy": False, "response_time": time.time() - start_time, "status_code": status_code, "error": error_message}
 
 async def keep_alive_ping():
     try:
