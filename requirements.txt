@@ -21,7 +21,3 @@ python-multipart==0.0.6
 
 # Gemini 2.5 多模态支持
 google-genai>=1.0.0
-
-# 网页抓取
-beautifulsoup4==4.12.3
-readability-lxml

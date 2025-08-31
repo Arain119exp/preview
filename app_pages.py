@@ -1688,37 +1688,13 @@ def render_system_settings_page():
         if search_data and search_data.get('success'):
             current_config = search_data.get('config', {})
             current_enabled = current_config.get('enabled', False)
-            num_queries = current_config.get('num_queries', 3)
-            num_pages_per_query = current_config.get('num_pages_per_query', 5)
 
             with st.form("search_form"):
                 enabled = st.checkbox("启用搜索功能", value=current_enabled, help="开启后，包含 [Search] 关键词的请求将触发联网搜索流程")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    queries = st.number_input(
-                        "生成查询数量",
-                        min_value=1,
-                        max_value=5,
-                        value=num_queries,
-                        step=1,
-                        help="为用户问题生成的搜索查询数量 (1-5)"
-                    )
-                with col2:
-                    pages = st.number_input(
-                        "每个查询爬取页面数",
-                        min_value=1,
-                        max_value=10,
-                        value=num_pages_per_query,
-                        step=1,
-                        help="为每个查询爬取的搜索结果页面数量 (1-10)"
-                    )
 
                 if st.form_submit_button("保存搜索配置", type="primary", use_container_width=True):
                     update_data = {
-                        'enabled': enabled,
-                        'num_queries': queries,
-                        'num_pages_per_query': pages
+                        'enabled': enabled
                     }
                     result = update_search_config(update_data)
                     if result and result.get('success'):

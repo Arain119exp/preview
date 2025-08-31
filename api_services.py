@@ -11,9 +11,7 @@ from typing import Coroutine, Dict, List, Optional, AsyncGenerator, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import httpx
-from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
-from readability import Document
 
 from google.genai import types
 from fastapi import HTTPException
@@ -2019,113 +2017,101 @@ async def execute_search_flow(
     file_storage: Dict,
     enable_anti_detection: bool = True
 ) -> Dict:
-    """执行搜索流程"""
-    search_config = db.get_search_config()
+    """
+    执行由模型驱动的自主搜索流程.
+    """
     original_user_prompt = next((m.content for m in original_request.messages if m.role == 'user'), '')
     if not original_user_prompt:
-        raise HTTPException(status_code=400, detail="User prompt is missing.")
+        raise HTTPException(status_code=400, detail="User prompt is missing for search.")
 
-    # 1. 生成搜索查询
-    prompt_generation_request_content = {
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "text": f"Based on the user's request, generate {search_config['num_queries']} distinct and diverse search queries for Google. Return the queries as a JSON array of strings. User request: \"{original_user_prompt}\""
-            }]
-        }],
-        "generation_config": {
-            "temperature": 0.5,
-            "maxOutputTokens": 2048,
-            "response_mime_type": "application/json",
-        }
-    }
-    
+    logger.info(f"Starting model-driven search flow for prompt: '{original_user_prompt}'")
+
+    # 1. 由模型生成搜索查询
+    search_queries = []
     try:
-        # 创建一个临时的ChatCompletionRequest对象用于生成搜索查询
-        temp_request_for_prompts = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": "generate search queries"}])
+        generation_prompt = f"根据以下用户请求，生成一个或多个简洁有效的搜索查询，以全面回答该请求。以 JSON 数组的形式返回结果。用户请求：'{original_user_prompt}'"
+        query_generation_request = {
+            "contents": [{"role": "user", "parts": [{"text": generation_prompt}]}],
+            "generation_config": {"temperature": 0.5, "maxOutputTokens": 2048, "response_mime_type": "application/json"}
+        }
+        temp_request = ChatCompletionRequest(model=model_name, messages=[{"role": "user", "content": "generate queries"}])
+        response = await make_request_with_fast_failover(db, rate_limiter, query_generation_request, temp_request, model_name, user_key_info, _internal_call=True)
         
-        response = await make_request_with_fast_failover(db, rate_limiter, prompt_generation_request_content, temp_request_for_prompts, model_name, user_key_info, _internal_call=True)
-        queries_text = response['choices'][0]['message']['content']
-        queries = json.loads(queries_text)
-        if not isinstance(queries, list) or not queries:
-            raise ValueError("Failed to generate valid search queries.")
-    except Exception as e:
-        logger.error(f"Search query generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate search queries.")
+        queries_str = response['choices'][0]['message']['content']
+        search_queries = json.loads(queries_str)
+        
+        if not isinstance(search_queries, list) or not all(isinstance(q, str) for q in search_queries):
+            raise ValueError("Model did not return a valid JSON array of strings for search queries.")
+        
+        logger.info(f"Model generated {len(search_queries)} search queries: {search_queries}")
 
-    # 2. 爬取搜索结果链接
-    async def get_urls_from_google(query: str, num_pages: int) -> List[str]:
-        urls = []
+    except Exception as e:
+        logger.error(f"Failed to generate search queries by model: {e}. Falling back to user prompt.")
+        search_queries = [original_user_prompt]
+
+    # 2. 并发执行搜索
+    async def search_duckduckgo(query: str):
         try:
             async with httpx.AsyncClient() as client:
-                search_url = f"https://www.google.com/search?q={quote_plus(query)}"
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-                response = await client.get(search_url, headers=headers)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                # This is a simple selector, might need to be adjusted if Google changes its layout
-                for a in soup.find_all('a', href=True):
-                    href = a['href']
-                    if href.startswith('/url?q='):
-                        url = href.split('/url?q=')[1].split('&sa=U')[0]
-                        if url.startswith('http'):
-                            urls.append(url)
-                            if len(urls) >= num_pages:
-                                break
+                params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
+                headers = {"User-Agent": "GeminiProxy/1.7.0"}
+                response = await client.get("https://api.duckduckgo.com/", params=params, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                
+                results = []
+                if data.get("AbstractText"):
+                    results.append(f"Source: {data.get('AbstractSource', 'N/A')}\nContent: {data.get('AbstractText')}")
+                
+                related_topics = data.get("RelatedTopics", [])
+                for topic in related_topics:
+                    if "Text" in topic and len(results) < 3: # 每个查询最多补充到3条
+                        results.append(f"Result: {topic['Text']}")
+                
+                return f"--- Results for query '{query}' ---\n" + "\n\n".join(results) if results else ""
         except Exception as e:
-            logger.error(f"Failed to get URLs from Google for query '{query}': {e}")
-        return urls
+            logger.warning(f"DuckDuckGo search failed for query '{query}': {e}")
+            return ""
 
-    tasks = [get_urls_from_google(q, search_config['num_pages_per_query']) for q in queries]
-    results = await asyncio.gather(*tasks)
-    all_urls = [url for sublist in results for url in sublist]
-
-    # 3. 并发爬取网页内容
-    async def scrape_url(url: str):
-        try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-                response = await client.get(url, headers=headers, timeout=10.0)
-                
-                # 使用 readability 提取主要内容
-                doc = Document(response.text)
-                summary_html = doc.summary()
-                
-                # 再次使用 BeautifulSoup 清理 HTML 标签，获取纯文本
-                soup = BeautifulSoup(summary_html, 'html.parser')
-                text = soup.get_text(separator='\n', strip=True)
-                
-                return text[:2000] # 限制内容长度
-        except Exception as e:
-            logger.error(f"Failed to scrape URL {url}: {e}")
-            return f"Error scraping content from {url}."
-
-    tasks = [scrape_url(url) for url in all_urls]
-    contents = await asyncio.gather(*tasks)
-
-    # 4. 构建最终提示
-    scraped_context = "\n\n".join([f"--- Scraped Content from URL {i+1} ---\n{content}" for i, content in enumerate(contents)])
+    search_tasks = [search_duckduckgo(query) for query in search_queries]
+    search_results = await asyncio.gather(*search_tasks)
     
-    # 获取并格式化当前的北京时间
+    # 3. 聚合和格式化结果
+    search_context = "\n\n".join(filter(None, search_results))
+    if not search_context.strip():
+        search_context = "No search results found."
+        logger.warning("All search queries returned no usable results.")
+    else:
+        logger.info(f"Aggregated search context length: {len(search_context)} chars")
+
+    # 4. 构建最终的综合提示
     beijing_time = datetime.now(ZoneInfo("Asia/Shanghai")).strftime('%Y-%m-%d %H:%M:%S')
     
     synthesis_prompt = f"""
-    Current Beijing Time: {beijing_time}
+Please provide a comprehensive answer to the user's original request based on the following search results.
+The current Beijing time is {beijing_time}.
 
-    Based on the user's original request and the following scraped web content, provide a comprehensive answer.
+--- Search Results ---
+{search_context}
+--- End of Search Results ---
 
-    Original Request: "{original_user_prompt}"
+User's Original Request: "{original_user_prompt}"
 
-    --- Web Content ---
-    {scraped_context}
-    --- End of Web Content ---
-
-    Final Answer:
-    """
+Final Answer:
+"""
     
-    # 更新原始请求的消息
-    original_request.messages.append(ChatMessage(role="user", content=synthesis_prompt))
+    # 5. 更新原始请求的消息并返回最终的gemini_request
+    final_messages = copy.deepcopy(original_request.messages)
+    user_message_found = False
+    for msg in reversed(final_messages):
+        if msg.role == 'user':
+            msg.content = synthesis_prompt
+            user_message_found = True
+            break
     
-    # 重新生成gemini_request
-    gemini_request = openai_to_gemini(db, original_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)
+    if not user_message_found:
+        final_messages.append(ChatMessage(role="user", content=synthesis_prompt))
+
+    final_openai_request = original_request.copy(update={"messages": final_messages})
     
-    return gemini_request
+    return openai_to_gemini(db, final_openai_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)
