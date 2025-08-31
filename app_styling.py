@@ -1044,7 +1044,7 @@ def apply_styling():
     .stNumberInput > div > div > input,
     .stSelectbox > div > div > select,
     .stTextArea > div > div > textarea {
-        background: rgba(255, 255, 255, 0.6) !important;
+        background: rgba(249, 250, 251, 0.8) !important;
         backdrop-filter: blur(12px) !important;
         -webkit-backdrop-filter: blur(12px) !important;
         border: 1px solid rgba(99, 102, 241, 0.2) !important;

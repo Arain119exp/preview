@@ -26,7 +26,7 @@ from api_services import (_execute_deepthink_preprocessing, execute_search_flow,
 from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
                        delete_file_from_gemini, get_actual_model_name,
                        inject_prompt_to_messages, openai_to_gemini,
-                       upload_file_to_gemini, validate_file_for_gemini)
+                       upload_file_to_gemini, validate_file_for_gemini, UserRateLimiter)
 from database import Database
 from api_services import auto_cleanup_failed_keys
 from dependencies import (get_anti_detection, get_db, get_keep_alive_enabled,
@@ -324,6 +324,18 @@ async def chat_completions(
     user_key_info = db.validate_user_key(authorization.replace("Bearer ", ""))
     if not user_key_info:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # 用户级别速率限制
+    try:
+        user_rate_limiter = UserRateLimiter(db, user_key_info)
+        user_rate_limiter.check_rate_limits()
+    except HTTPException as e:
+        # 直接抛出 UserRateLimiter 中生成的异常
+        raise e
+    except Exception as e:
+        # 捕获其他潜在错误
+        logger.error(f"Error during user rate limit check: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error during rate limit check")
 
     # 提前执行提示词注入，以确保在所有模式下都生效
     request.messages = inject_prompt_to_messages(db, request.messages)

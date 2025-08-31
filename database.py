@@ -404,7 +404,7 @@ class Database:
         return {
             'enabled': self.get_config('thinking_enabled', 'true').lower() == 'true',
             'budget': int(self.get_config('thinking_budget', '-1')),
-            'include_thoughts': self.get_config('include_thoughts', 'false').lower() == 'true'
+            'include_thoughts': self.get_config('include_thoughts', 'true').lower() == 'true'
         }
 
     def set_thinking_config(self, enabled: bool = None, budget: int = None, include_thoughts: bool = None) -> bool:
@@ -1366,6 +1366,38 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to get user key {key_id}: {e}")
             return None
+
+    def get_user_key_usage_stats(self, user_key_id: int, time_window: str) -> Dict[str, int]:
+        """获取指定用户密钥在指定时间窗口内的使用统计"""
+        try:
+            time_deltas = {
+                'minute': timedelta(minutes=1),
+                'day': timedelta(days=1)
+            }
+
+            if time_window not in time_deltas:
+                raise ValueError(f"Invalid time window: {time_window}")
+
+            cutoff_time = datetime.now() - time_deltas[time_window]
+
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        COALESCE(SUM(requests), 0) as total_requests,
+                        COALESCE(SUM(tokens), 0) as total_tokens
+                    FROM usage_logs
+                    WHERE user_key_id = ? AND timestamp > ?
+                ''', (user_key_id, cutoff_time))
+
+                row = cursor.fetchone()
+                return {
+                    'requests': row['total_requests'],
+                    'tokens': row['total_tokens']
+                }
+        except Exception as e:
+            logger.error(f"Failed to get user key usage stats for {user_key_id}: {e}")
+            return {'requests': 0, 'tokens': 0}
 
     def update_user_key(self, key_id: int, **kwargs) -> bool:
         """更新用户Key信息"""

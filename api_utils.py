@@ -113,6 +113,36 @@ class GeminiAntiDetectionInjector:
             'max_history_size': self.max_history_size
         }
 
+class UserRateLimiter:
+    """处理单个用户密钥的速率限制"""
+    def __init__(self, db: Database, user_key_info: Dict):
+        self.db = db
+        self.user_key_info = user_key_info
+
+    def check_rate_limits(self):
+        """检查用户是否超出速率限制"""
+        user_id = self.user_key_info['id']
+        
+        # -1 表示无限制
+        rpm_limit = self.user_key_info.get('rpm_limit', -1)
+        tpm_limit = self.user_key_info.get('tpm_limit', -1)
+        rpd_limit = self.user_key_info.get('rpd_limit', -1)
+
+        # 检查每分钟请求数 (RPM) 和每分钟令牌数 (TPM)
+        if rpm_limit != -1 or tpm_limit != -1:
+            usage_minute = self.db.get_user_key_usage_stats(user_id, 'minute')
+            if rpm_limit != -1 and usage_minute['requests'] >= rpm_limit:
+                raise HTTPException(status_code=429, detail=f"Rate limit exceeded for RPM: {rpm_limit}")
+            if tpm_limit != -1 and usage_minute['tokens'] >= tpm_limit:
+                raise HTTPException(status_code=429, detail=f"Rate limit exceeded for TPM: {tpm_limit}")
+
+        # 检查每天请求数 (RPD)
+        if rpd_limit != -1:
+            usage_day = self.db.get_user_key_usage_stats(user_id, 'day')
+            if usage_day['requests'] >= rpd_limit:
+                raise HTTPException(status_code=429, detail=f"Rate limit exceeded for RPD: {rpd_limit}")
+
+
 def decrypt_response(hex_string: str) -> str:
     if not isinstance(hex_string, str) or not hex_string or len(hex_string) % 8 != 0: return hex_string
     try:
