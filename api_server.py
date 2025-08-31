@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from asyncio import Queue
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,9 +33,30 @@ default_keep_alive = 'true' if os.getenv('RENDER') else 'false'
 keep_alive_enabled = os.getenv('ENABLE_KEEP_ALIVE', default_keep_alive).lower() == 'true'
 
 # Initialize database and anti-detection injector
-db = Database()
+db_queue = Queue()
+db = Database(db_queue=db_queue)
 anti_detection = GeminiAntiDetectionInjector()
 rate_limiter = RateLimitCache()
+
+async def db_writer_worker(queue: Queue, db_instance: Database):
+    """A worker that processes database write operations from a queue."""
+    logger.info("Starting database writer worker...")
+    while True:
+        try:
+            task = await queue.get()
+            if task is None:  # Sentinel for stopping the worker
+                break
+            
+            operation, data = task
+            if operation == "log_usage":
+                db_instance.log_usage_sync(**data)
+            
+            queue.task_done()
+        except asyncio.CancelledError:
+            logger.info("Database writer worker cancelled.")
+            break
+        except Exception as e:
+            logger.error(f"Error in db_writer_worker: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,6 +66,9 @@ async def lifespan(app: FastAPI):
     """
     global scheduler, keep_alive_enabled
     logger.info("🚀 Service starting up...")
+
+    # Start the database writer worker
+    db_worker_task = asyncio.create_task(db_writer_worker(db_queue, db))
 
     # Initialize and start the scheduler on startup if keep-alive is enabled
     if keep_alive_enabled:
@@ -87,12 +112,18 @@ async def lifespan(app: FastAPI):
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("Scheduler shut down.")
+    
+    # Stop the database writer worker
+    await db_queue.put(None)
+    await db_worker_task
+    logger.info("Database writer worker shut down.")
+
     logger.info("👋 Service shutting down...")
 
 # Create FastAPI app instance
 app = FastAPI(
     title="Gemini API Proxy",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc"

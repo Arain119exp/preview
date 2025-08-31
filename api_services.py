@@ -8,13 +8,17 @@ import os
 import copy
 import itertools
 from typing import Dict, List, Optional, AsyncGenerator, Any
+import httpx
+from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
+from readability import Document
 
 from google.genai import types
 from fastapi import HTTPException
 
 from database import Database
 from api_models import ChatCompletionRequest
-from api_utils import get_cached_client, map_finish_reason, decrypt_response, check_gemini_key_health, RateLimitCache
+from api_utils import get_cached_client, map_finish_reason, decrypt_response, check_gemini_key_health, RateLimitCache, openai_to_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +152,8 @@ async def collect_gemini_response_directly(
         gemini_request: Dict,
         openai_request: ChatCompletionRequest,
         model_name: str,
-        use_stream: bool = True
+        use_stream: bool = True,
+        _internal_call: bool = False
 ) -> Dict:
     """
     从Google API收集完整响应
@@ -247,7 +252,7 @@ async def collect_gemini_response_directly(
 
     # Anti-truncation handling for non-stream response
     anti_trunc_cfg = db.get_anti_truncation_config() if hasattr(db, 'get_anti_truncation_config') else {'enabled': False}
-    if anti_trunc_cfg.get('enabled'):
+    if anti_trunc_cfg.get('enabled') and not _internal_call:
         max_attempts = anti_trunc_cfg.get('max_attempts', 3)
         attempt = 0
         while True:
@@ -296,7 +301,7 @@ async def collect_gemini_response_directly(
 
     # 如果启用了响应解密，则解密内容
     decryption_enabled = db.get_response_decryption_config().get('enabled', False)
-    if decryption_enabled:
+    if decryption_enabled and not _internal_call:
         logger.info(f"Decrypting response. Original length: {len(complete_content_final)}")
         final_content = decrypt_response(complete_content_final)
         logger.info(f"Decrypted length: {len(final_content)}")
@@ -393,7 +398,8 @@ async def make_request_with_fast_failover(
         openai_request: ChatCompletionRequest,
         model_name: str,
         user_key_info: Dict = None,
-        max_key_attempts: int = None
+        max_key_attempts: int = None,
+        _internal_call: bool = False
 ) -> Dict:
     """
     快速故障转移请求处理
@@ -481,7 +487,8 @@ async def make_request_with_fast_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name
+                    model_name,
+                    _internal_call=_internal_call
                 )
                 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
@@ -564,7 +571,8 @@ async def stream_gemini_response_single_attempt(
         key_id: int,
         gemini_request: Dict,
         openai_request: ChatCompletionRequest,
-        model_name: str
+        model_name: str,
+        _internal_call: bool = False
 ) -> AsyncGenerator[bytes, None]:
     """
     单次流式请求尝试，失败立即抛出异常，使用 google-genai SDK 实现
@@ -643,7 +651,7 @@ async def stream_gemini_response_single_attempt(
                                 
                                 # Anti-truncation handling (stream) remains the same
                                 text_to_send = text
-                                if anti_trunc_cfg.get('enabled'):
+                                if anti_trunc_cfg.get('enabled') and not _internal_call:
                                     idx = text.find('[finish]')
                                     if idx != -1:
                                         text_to_send = text[:idx]
@@ -763,7 +771,8 @@ async def stream_with_fast_failover(
         openai_request: ChatCompletionRequest,
         model_name: str,
         user_key_info: Dict = None,
-        max_key_attempts: int = None
+        max_key_attempts: int = None,
+        _internal_call: bool = False
 ) -> AsyncGenerator[bytes, None]:
     """
     流式响应快速故障转移
@@ -828,7 +837,8 @@ async def stream_with_fast_failover(
                         key_info['id'],
                         gemini_request,
                         openai_request,
-                        model_name
+                        model_name,
+                        _internal_call=_internal_call
                 ):
                     yield chunk
                     success = True
@@ -905,42 +915,90 @@ async def stream_with_fast_failover(
     yield "data: [DONE]\n\n".encode('utf-8')
 
 
+async def _keep_alive_generator(task: asyncio.Task) -> AsyncGenerator[bytes, Any]:
+    """
+    一个通用的异步生成器，用于在后台任务运行时发送 keep-alive 心跳。
+    任务完成后，它会 yield 任务的结果。
+    """
+    while not task.done():
+        try:
+            # 等待任务2秒，如果未完成则发送心跳
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except asyncio.TimeoutError:
+            yield b": keep-alive\n\n"
+    
+    # 任务完成，返回结果
+    yield await task
+
+
+async def stream_with_preprocessing(
+    preprocessing_coro: asyncio.coroutine,
+    streaming_func: callable,
+    db: Database,
+    rate_limiter: RateLimitCache,
+    openai_request: ChatCompletionRequest,
+    model_name: str,
+    user_key_info: Dict = None
+) -> AsyncGenerator[bytes, None]:
+    """
+    在执行一个耗时的预处理任务时发送 keep-alive 心跳，然后流式传输最终结果。
+    """
+    task = asyncio.create_task(preprocessing_coro)
+    
+    async for result in _keep_alive_generator(task):
+        if isinstance(result, bytes):
+            yield result  # This is a keep-alive chunk
+        else:
+            # This is the final result from the preprocessing task
+            modified_gemini_request = result
+            if modified_gemini_request:
+                # Now, stream the final response
+                async for chunk in streaming_func(db, rate_limiter, modified_gemini_request, openai_request, model_name, user_key_info):
+                    yield chunk
+            else:
+                # Handle cases where preprocessing failed
+                error_data = {"error": {"message": "Preprocessing failed to produce a valid request.", "code": 500}}
+                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+
+
 async def stream_non_stream_keep_alive(
         db: Database,
         rate_limiter: RateLimitCache,
         gemini_request: Dict,
         openai_request: ChatCompletionRequest,
         model_name: str,
-        user_key_info: Dict = None
+        user_key_info: Dict = None,
+        _internal_call: bool = False
 ) -> AsyncGenerator[bytes, None]:
-    """向 Gemini 使用非流式接口，但对客户端保持 SSE 流式格式。先发送 keep-alive 空 chunk，再完整返回内容。"""
-    # 立即发送一次空注释保持连接
-    yield b":\n\n"
-
-    try:
-        # 根据是否启用快速故障转移选择请求路径
+    """
+    向 Gemini 使用非流式接口，但对客户端保持 SSE 流式格式。
+    在等待后端响应时发送 keep-alive，然后一次性返回完整内容。
+    """
+    async def get_full_response():
         if await should_use_fast_failover(db):
-            openai_response = await make_request_with_fast_failover(
-                db,
-                rate_limiter,
-                gemini_request,
-                openai_request,
-                model_name,
-                user_key_info=user_key_info
+            return await make_request_with_fast_failover(
+                db, rate_limiter, gemini_request, openai_request, model_name,
+                user_key_info=user_key_info, _internal_call=_internal_call
             )
         else:
-            openai_response = await make_request_with_failover(
-                db,
-                rate_limiter,
-                gemini_request,
-                openai_request,
-                model_name,
-                user_key_info=user_key_info
+            return await make_request_with_failover(
+                db, rate_limiter, gemini_request, openai_request, model_name,
+                user_key_info=user_key_info, _internal_call=_internal_call
             )
 
-        # 将完整响应再次封装为单次 data 事件
-        yield f"data: {json.dumps(openai_response, ensure_ascii=False)}\n\n".encode("utf-8")
-        yield b"data: [DONE]\n\n"
+    task = asyncio.create_task(get_full_response())
+
+    try:
+        async for result in _keep_alive_generator(task):
+            if isinstance(result, bytes):
+                yield result  # This is a keep-alive chunk
+            else:
+                # This is the final complete response
+                openai_response = result
+                yield f"data: {json.dumps(openai_response, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+
     except HTTPException as e:
         error_data = {"error": {"message": e.detail, "code": e.status_code}}
         yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1004,10 +1062,10 @@ async def select_gemini_key_and_check_limits(db: Database, rate_limiter: RateLim
             idx = next(_rr_counter) % len(available_keys)
             selected_key = available_keys[idx]
     elif strategy == 'least_used':
-        # 按总请求数排序（需要数据库支持）
+        # 按总请求数排序
         sorted_keys = sorted(available_keys, key=lambda k: k.get('total_requests', 0))
         selected_key = sorted_keys[0]
-    else:  # adaptive strategy (默认, 升级版)
+    else:  # adaptive strategy
         best_key = None
         best_score = -1.0
 
@@ -1121,7 +1179,8 @@ async def make_request_with_failover(
         model_name: str,
         user_key_info: Dict = None,
         max_key_attempts: int = None,
-        excluded_keys: set = None
+        excluded_keys: set = None,
+        _internal_call: bool = False
 ) -> Dict:
     """传统请求处理（保留用于兼容）"""
     if excluded_keys is None:
@@ -1200,7 +1259,8 @@ async def make_request_with_failover(
                     key_info['id'],
                     gemini_request,
                     openai_request,
-                    model_name
+                    model_name,
+                    _internal_call=_internal_call
                 )
 
                 logger.info(f"✅ Request successful with key #{key_info['id']} on attempt {attempt + 1}")
@@ -1275,7 +1335,8 @@ async def stream_with_failover(
         model_name: str,
         user_key_info: Dict = None,
         max_key_attempts: int = None,
-        excluded_keys: set = None
+        excluded_keys: set = None,
+        _internal_call: bool = False
 ) -> AsyncGenerator[bytes, None]:
     """传统流式响应处理（保留用于兼容）"""
     if excluded_keys is None:
@@ -1331,7 +1392,8 @@ async def stream_with_failover(
                         gemini_request,
                         openai_request,
                         key_info,
-                        model_name
+                        model_name,
+                        _internal_call=_internal_call
                 ):
                     yield chunk
                     success = True
@@ -1405,7 +1467,8 @@ async def stream_gemini_response(
         gemini_request: Dict,
         openai_request: ChatCompletionRequest,
         key_info: Dict,
-        model_name: str
+        model_name: str,
+        _internal_call: bool = False
 ) -> AsyncGenerator[bytes, None]:
     """处理Gemini的流式响应，记录性能指标"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
@@ -1557,7 +1620,7 @@ async def stream_gemini_response(
                                                 total_tokens += len(text.split())
                                                 has_content = True
                                                 # Anti-truncation handling
-                                                if anti_trunc_cfg.get('enabled'):
+                                                if anti_trunc_cfg.get('enabled') and not _internal_call:
                                                     idx = text.find('[finish]')
                                                     if idx != -1:
                                                         text_to_send = text[:idx]
@@ -1870,3 +1933,192 @@ async def cleanup_database_records(db: Database):
         
     except Exception as e:
         logger.error(f"❌ Daily database cleanup failed: {e}")
+
+
+async def _execute_deepthink_preprocessing(
+    db: Database,
+    rate_limiter: RateLimitCache,
+    original_request: ChatCompletionRequest,
+    model_name: str,
+    user_key_info: Dict,
+    concurrency: int,
+    anti_detection: Any,
+    file_storage: Dict,
+    enable_anti_detection: bool = False
+) -> Dict:
+    """DeepThink的预处理部分，返回最终的gemini_request"""
+    original_user_prompt = next((m.content for m in original_request.messages if m.role == 'user'), '')
+    if not original_user_prompt:
+        raise HTTPException(status_code=400, detail="User prompt is missing.")
+
+    # 1. 生成N个新Prompt
+    prompt_generation_request = {
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": f"Based on the user's request, generate {concurrency} distinct and diverse thinking prompts to explore the problem from different angles. Return the prompts as a JSON array of strings. User request: \"{original_user_prompt}\""
+            }]
+        }],
+        "generation_config": { "temperature": 0.5, "maxOutputTokens": 2048, "response_mime_type": "application/json" }
+    }
+    
+    try:
+        temp_request = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": "generate prompts"}])
+        response = await make_request_with_fast_failover(db, rate_limiter, prompt_generation_request, temp_request, model_name, user_key_info, _internal_call=True)
+        prompts = json.loads(response['choices'][0]['message']['content'])
+        if not isinstance(prompts, list) or len(prompts) != concurrency:
+            raise ValueError(f"Failed to generate {concurrency} valid prompts.")
+    except Exception as e:
+        logger.error(f"DeepThink prompt generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate thinking prompts.")
+
+    # 2. 并发执行
+    async def run_prompt(prompt):
+        request_body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generation_config": gemini_request.get("generation_config")}
+        try:
+            temp_req = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": prompt}])
+            response = await make_request_with_fast_failover(db, rate_limiter, request_body, temp_req, model_name, user_key_info, _internal_call=True)
+            return response['choices'][0]['message']['content']
+        except Exception as e:
+            logger.error(f"DeepThink sub-request failed for prompt '{prompt}': {e}")
+            return f"Error processing sub-request: {e}"
+
+    tasks = [run_prompt(p) for p in prompts]
+    answers = await asyncio.gather(*tasks)
+
+    # 3. 综合提炼
+    explorations = "\n\n".join([f"Exploration {i+1}:\n\"{answer}\"" for i, answer in enumerate(answers)])
+    synthesis_prompt = f'Original user request: "{original_user_prompt}"\n\nBased on the original request and the following {concurrency} independent explorations, synthesize a final, high-quality answer.\n\n{explorations}\n\nSynthesized Answer:'
+    
+    # 更新原始请求以包含综合提示
+    final_request_messages = copy.deepcopy(original_request.messages)
+    # 替换或追加综合提示
+    found_user = False
+    for msg in reversed(final_request_messages):
+        if msg.role == 'user':
+            msg.content = synthesis_prompt
+            found_user = True
+            break
+    if not found_user:
+         final_request_messages.append({"role": "user", "content": synthesis_prompt})
+
+    final_openai_request = original_request.copy(update={"messages": final_request_messages})
+    
+    # 4. 返回最终的gemini_request
+    return openai_to_gemini(db, final_openai_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)
+
+async def execute_search_flow(
+    db: Database,
+    rate_limiter: RateLimitCache,
+    original_request: ChatCompletionRequest,
+    model_name: str,
+    user_key_info: Dict,
+    anti_detection: Any,
+    file_storage: Dict,
+    enable_anti_detection: bool = True
+) -> Dict:
+    """执行搜索流程"""
+    search_config = db.get_search_config()
+    original_user_prompt = next((m.content for m in original_request.messages if m.role == 'user'), '')
+    if not original_user_prompt:
+        raise HTTPException(status_code=400, detail="User prompt is missing.")
+
+    # 1. 生成搜索查询
+    prompt_generation_request_content = {
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": f"Based on the user's request, generate {search_config['num_queries']} distinct and diverse search queries for Google. Return the queries as a JSON array of strings. User request: \"{original_user_prompt}\""
+            }]
+        }],
+        "generation_config": {
+            "temperature": 0.5,
+            "maxOutputTokens": 2048,
+            "response_mime_type": "application/json",
+        }
+    }
+    
+    try:
+        # 创建一个临时的ChatCompletionRequest对象用于生成搜索查询
+        temp_request_for_prompts = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": "generate search queries"}])
+        
+        response = await make_request_with_fast_failover(db, rate_limiter, prompt_generation_request_content, temp_request_for_prompts, model_name, user_key_info, _internal_call=True)
+        queries_text = response['choices'][0]['message']['content']
+        queries = json.loads(queries_text)
+        if not isinstance(queries, list) or not queries:
+            raise ValueError("Failed to generate valid search queries.")
+    except Exception as e:
+        logger.error(f"Search query generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate search queries.")
+
+    # 2. 爬取搜索结果链接
+    async def get_urls_from_google(query: str, num_pages: int) -> List[str]:
+        urls = []
+        try:
+            async with httpx.AsyncClient() as client:
+                search_url = f"https://www.google.com/search?q={quote_plus(query)}"
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+                response = await client.get(search_url, headers=headers)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                # This is a simple selector, might need to be adjusted if Google changes its layout
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('/url?q='):
+                        url = href.split('/url?q=')[1].split('&sa=U')[0]
+                        if url.startswith('http'):
+                            urls.append(url)
+                            if len(urls) >= num_pages:
+                                break
+        except Exception as e:
+            logger.error(f"Failed to get URLs from Google for query '{query}': {e}")
+        return urls
+
+    tasks = [get_urls_from_google(q, search_config['num_pages_per_query']) for q in queries]
+    results = await asyncio.gather(*tasks)
+    all_urls = [url for sublist in results for url in sublist]
+
+    # 3. 并发爬取网页内容
+    async def scrape_url(url: str):
+        try:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+                response = await client.get(url, headers=headers, timeout=10.0)
+                
+                # 使用 readability 提取主要内容
+                doc = Document(response.text)
+                summary_html = doc.summary()
+                
+                # 再次使用 BeautifulSoup 清理 HTML 标签，获取纯文本
+                soup = BeautifulSoup(summary_html, 'html.parser')
+                text = soup.get_text(separator='\n', strip=True)
+                
+                return text[:2000] # 限制内容长度
+        except Exception as e:
+            logger.error(f"Failed to scrape URL {url}: {e}")
+            return f"Error scraping content from {url}."
+
+    tasks = [scrape_url(url) for url in all_urls]
+    contents = await asyncio.gather(*tasks)
+
+    # 4. 构建最终提示
+    scraped_context = "\n\n".join([f"--- Scraped Content from URL {i+1} ---\n{content}" for i, content in enumerate(contents)])
+    
+    synthesis_prompt = f"""
+    Based on the user's original request and the following scraped web content, provide a comprehensive answer.
+
+    Original Request: "{original_user_prompt}"
+
+    --- Web Content ---
+    {scraped_context}
+    --- End of Web Content ---
+
+    Final Answer:
+    """
+    
+    # 更新原始请求的消息
+    original_request.messages.append({"role": "user", "content": synthesis_prompt})
+    
+    # 重新生成gemini_request
+    gemini_request = openai_to_gemini(db, original_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)
+    
+    return gemini_request

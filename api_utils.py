@@ -245,12 +245,22 @@ async def delete_file_from_gemini(file_uri: str, gemini_key: str) -> bool:
         return False
 
 def get_actual_model_name(db: Database, request_model: str) -> str:
-    supported_models = db.get_supported_models()
-    if request_model in supported_models:
-        logger.info(f"Using requested model: {request_model}")
-        return request_model
+    # 首先尝试直接按 model_name 匹配
+    all_configs = db.get_all_model_configs()
+    for config in all_configs:
+        if config['model_name'] == request_model:
+            logger.info(f"Found model by model_name: {request_model}")
+            return request_model
+
+    # 如果找不到，再尝试按 display_name 匹配
+    for config in all_configs:
+        if config['display_name'] == request_model:
+            logger.info(f"Found model by display_name: '{request_model}', mapping to model_name: '{config['model_name']}'")
+            return config['model_name']
+
+    # 如果都找不到，返回默认模型
     default_model = db.get_config('default_model_name', 'gemini-2.5-flash-lite')
-    logger.info(f"Unsupported model: {request_model}, using default: {default_model}")
+    logger.warning(f"Model '{request_model}' not found by model_name or display_name, falling back to default: {default_model}")
     return default_model
 
 def inject_prompt_to_messages(db: Database, messages: List[ChatMessage]) -> List[ChatMessage]:

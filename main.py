@@ -90,7 +90,7 @@ def render_sidebar():
         <div class="sidebar-footer">
             <div class="sidebar-footer-content">
                 <div class="sidebar-footer-item">
-                    <span>版本 v1.4.2</span>
+                    <span>版本 v1.6.0</span>
                 </div>
                 <div class="sidebar-footer-item">
                     <a href="{API_BASE_URL}/docs" target="_blank" class="sidebar-footer-link">API 文档</a>
@@ -108,7 +108,7 @@ def render_footer():
         <div style='text-align: center; color: rgba(255, 255, 255, 0.7); font-size: 0.8125rem; margin-top: 4rem; padding: 2rem 0; border-top: 1px solid rgba(255, 255, 255, 0.15); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); background: rgba(255, 255, 255, 0.05); border-radius: 16px 16px 0 0; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);'>
             <a href='{API_BASE_URL}/health' target='_blank' style='color: rgba(255, 255, 255, 0.8); text-decoration: none; transition: all 0.3s ease; padding: 0.25rem 0.5rem; border-radius: 6px; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);' onmouseover='this.style.color="white"; this.style.background="rgba(255, 255, 255, 0.1)"; this.style.textShadow="0 0 8px rgba(255, 255, 255, 0.5)";' onmouseout='this.style.color="rgba(255, 255, 255, 0.8)"; this.style.background="transparent"; this.style.textShadow="none";'>健康检查</a> · 
             <span style='color: rgba(255, 255, 255, 0.6);'>{API_BASE_URL}</span> ·
-            <span style='color: rgba(255, 255, 255, 0.6);'>v1.4.2</span>
+            <span style='color: rgba(255, 255, 255, 0.6);'>v1.6.0</span>
         </div>
         """,
         unsafe_allow_html=True

@@ -13,7 +13,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 class Database:
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, db_queue=None):
+        self.db_queue = db_queue
         # Render 环境下使用持久化路径
         if db_path is None:
             if os.getenv('RENDER_EXTERNAL_URL'):
@@ -103,6 +104,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS model_configs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_name TEXT UNIQUE NOT NULL,
+                    display_name TEXT UNIQUE,
                     single_api_rpm_limit INTEGER NOT NULL,
                     single_api_tpm_limit INTEGER NOT NULL,
                     single_api_rpd_limit INTEGER NOT NULL,
@@ -225,6 +227,10 @@ class Database:
             cursor.execute("PRAGMA table_info(model_configs)")
             columns = [column[1] for column in cursor.fetchall()]
 
+            if 'display_name' not in columns:
+                cursor.execute("ALTER TABLE model_configs ADD COLUMN display_name TEXT")
+                cursor.execute("UPDATE model_configs SET display_name = model_name WHERE display_name IS NULL")
+
             if 'rpm_limit' in columns:
                 # 需要迁移到新的单API限制结构
                 logger.info("正在迁移模型配置数据库结构...")
@@ -314,7 +320,14 @@ class Database:
             ('enable_response_decryption', 'false', '是否启用响应自动解密'),
             
             # 流式模式配置
-            ('stream_mode', 'auto', '流式模式设置: auto=自动, stream=流式, non_stream=非流式'),
+            ('stream_mode', 'auto', 'Stream mode setting: auto, stream, non_stream'),
+            ('deepthink_enabled', 'false', 'Enable DeepThink mode for multi-step reasoning'),
+            ('deepthink_concurrency', '3', 'Default concurrency for DeepThink mode (3-7)'),
+
+            # 搜索功能配置
+            ('search_enabled', 'false', '启用搜索模式进行网页抓取'),
+            ('search_num_queries', '3', '默认生成的搜索查询数量 (1-10)'),
+            ('search_num_pages_per_query', '5', '每个查询默认抓取的页面数量 (1-10)'),
         ]
 
         for key, value, description in default_configs:
@@ -640,6 +653,68 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to set response decryption config: {e}")
             return False
+
+    # DeepThink配置方法
+    def get_deepthink_config(self) -> Dict[str, any]:
+        """获取DeepThink配置"""
+        try:
+            return {
+                'enabled': self.get_config('deepthink_enabled', 'false').lower() == 'true',
+                'concurrency': int(self.get_config('deepthink_concurrency', '3'))
+            }
+        except Exception as e:
+            logger.error(f"Failed to get deepthink config: {e}")
+            return {'enabled': False, 'concurrency': 3}
+
+    def set_deepthink_config(self, enabled: bool = None, concurrency: int = None) -> bool:
+        """设置DeepThink配置"""
+        try:
+            if enabled is not None:
+                self.set_config('deepthink_enabled', 'true' if enabled else 'false')
+            
+            if concurrency is not None:
+                if not (3 <= concurrency <= 7):
+                    raise ValueError("Concurrency must be between 3 and 7")
+                self.set_config('deepthink_concurrency', str(concurrency))
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set deepthink config: {e}")
+            return False
+
+    # 搜索配置方法
+    def get_search_config(self) -> Dict[str, any]:
+        """获取搜索配置"""
+        try:
+            return {
+                'enabled': self.get_config('search_enabled', 'false').lower() == 'true',
+                'num_queries': int(self.get_config('search_num_queries', '3')),
+                'num_pages_per_query': int(self.get_config('search_num_pages_per_query', '5'))
+            }
+        except Exception as e:
+            logger.error(f"Failed to get search config: {e}")
+            return {'enabled': False, 'num_queries': 3, 'num_pages_per_query': 5}
+
+    def set_search_config(self, enabled: bool = None, num_queries: int = None, num_pages_per_query: int = None) -> bool:
+        """设置搜索配置"""
+        try:
+            if enabled is not None:
+                self.set_config('search_enabled', 'true' if enabled else 'false')
+            
+            if num_queries is not None:
+                if not (1 <= num_queries <= 10):
+                    raise ValueError("Number of queries must be between 1 and 10")
+                self.set_config('search_num_queries', str(num_queries))
+
+            if num_pages_per_query is not None:
+                if not (1 <= num_pages_per_query <= 10):
+                    raise ValueError("Number of pages must be between 1 and 10")
+                self.set_config('search_num_pages_per_query', str(num_pages_per_query))
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set search config: {e}")
+            return False
             
     # 模型配置管理
     def get_supported_models(self) -> List[str]:
@@ -710,7 +785,7 @@ class Database:
     def update_model_config(self, model_name: str, **kwargs) -> bool:
         """更新模型配置"""
         try:
-            allowed_fields = ['single_api_rpm_limit', 'single_api_tpm_limit', 'single_api_rpd_limit', 'status']
+            allowed_fields = ['display_name', 'single_api_rpm_limit', 'single_api_tpm_limit', 'single_api_rpd_limit', 'status']
             fields = []
             values = []
 
@@ -1362,7 +1437,26 @@ class Database:
 
     # 使用记录管理
     def log_usage(self, gemini_key_id: int, user_key_id: int, model_name: str, status: str = 'success', requests: int = 1, tokens: int = 0):
-        """记录使用量（按模型）"""
+        """Asynchronously log usage by putting it in a queue."""
+        if self.db_queue:
+            task = {
+                "gemini_key_id": gemini_key_id,
+                "user_key_id": user_key_id,
+                "model_name": model_name,
+                "status": status,
+                "requests": requests,
+                "tokens": tokens,
+            }
+            try:
+                self.db_queue.put_nowait(("log_usage", task))
+            except asyncio.QueueFull:
+                logger.warning("Database queue is full. Falling back to synchronous logging.")
+                self.log_usage_sync(**task)
+        else:
+            self.log_usage_sync(gemini_key_id, user_key_id, model_name, status, requests, tokens)
+
+    def log_usage_sync(self, gemini_key_id: int, user_key_id: int, model_name: str, status: str = 'success', requests: int = 1, tokens: int = 0):
+        """Synchronously log usage to the database."""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -1372,7 +1466,7 @@ class Database:
                 ''', (gemini_key_id, user_key_id, model_name, status, requests, tokens))
                 conn.commit()
         except Exception as e:
-            logger.error(f"Failed to log usage: {e}")
+            logger.error(f"Failed to log usage synchronously: {e}")
 
     def get_usage_stats(self, model_name: str, time_window: str = 'minute') -> Dict[str, int]:
         """获取指定模型在指定时间窗口内的使用统计"""

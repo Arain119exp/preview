@@ -1,6 +1,7 @@
 # api_routes.py
 import asyncio
 import base64
+import json
 import logging
 import mimetypes
 import os
@@ -16,12 +17,12 @@ from fastapi import (APIRouter, Depends, File, Header, HTTPException,
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api_models import ChatCompletionRequest
-from api_services import (make_request_with_failover,
+from api_services import (_execute_deepthink_preprocessing, execute_search_flow, make_request_with_failover,
                           make_request_with_fast_failover,
                           should_use_fast_failover,
                           stream_non_stream_keep_alive,
                           stream_with_failover, stream_with_fast_failover,
-                          delete_unhealthy_keys)
+                          delete_unhealthy_keys, stream_with_preprocessing)
 from api_utils import (GeminiAntiDetectionInjector, check_gemini_key_health,
                        delete_file_from_gemini, get_actual_model_name,
                        inject_prompt_to_messages, openai_to_gemini,
@@ -56,7 +57,7 @@ SUPPORTED_MIME_TYPES = {
     "audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4", "audio/flac", "audio/aac",
     # Video
     "video/mp4", "video/x-msvideo", "video/quicktime", "video/webm",
-    # Documents
+# Documents
     "application/pdf", "text/plain", "text/csv",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -74,7 +75,7 @@ async def root(
     return {
         "service": "Gemini API Proxy",
         "status": "running",
-        "version": "1.4.2",
+        "version": "1.6.0",
         "features": ["Gemini 2.5 Multimodal"],
         "keep_alive": keep_alive_enabled,
         "auto_cleanup": db.get_auto_cleanup_config()['enabled'],
@@ -100,7 +101,7 @@ async def health_check(
         "environment": "render" if os.getenv('RENDER_EXTERNAL_URL') else "local",
         "uptime_seconds": int(uptime),
         "request_count": request_count,
-        "version": "1.4.2",
+        "version": "1.6.0",
         "multimodal_support": "Gemini 2.5 Optimized",
         "keep_alive_enabled": keep_alive_enabled,
         "auto_cleanup_enabled": db.get_auto_cleanup_config()['enabled'],
@@ -135,7 +136,7 @@ async def get_status(
     return {
         "service": "Gemini API Proxy",
         "status": "running",
-        "version": "1.4.2",
+        "version": "1.6.0",
         "render_url": os.getenv('RENDER_EXTERNAL_URL'),
         "python_version": sys.version,
         "models": db.get_supported_models(),
@@ -187,7 +188,7 @@ async def api_v1_info(
     base_url = render_url if render_url else 'https://your-service.onrender.com'
     return {
         "service": "Gemini API Proxy",
-        "version": "1.4.2",
+        "version": "1.6.0",
         "api_version": "v1",
         "compatibility": "OpenAI API v1",
         "description": "A high-performance proxy for Gemini API with OpenAI compatibility.",
@@ -324,8 +325,62 @@ async def chat_completions(
     if not user_key_info:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    actual_model_name = get_actual_model_name(db, request.model)
+    # 提前执行提示词注入，以确保在所有模式下都生效
     request.messages = inject_prompt_to_messages(db, request.messages)
+
+    last_user_message = next((m.content for m in reversed(request.messages) if m.role == 'user'), None)
+    actual_model_name = get_actual_model_name(db, request.model)
+    
+    # DeepThink Logic
+    deepthink_config = db.get_deepthink_config()
+    if deepthink_config.get('enabled') and last_user_message and '[DeepThink' in last_user_message:
+        concurrency = deepthink_config.get('concurrency', 3)
+        match = re.search(r'\[DeepThink:(\d+)\]', last_user_message)
+        if match:
+            custom_concurrency = int(match.group(1))
+            if 3 <= custom_concurrency <= 7: concurrency = custom_concurrency
+            for msg in request.messages:
+                if msg.role == 'user': msg.content = msg.content.replace(match.group(0), '').strip()
+        else:
+            for msg in request.messages:
+                if msg.role == 'user': msg.content = msg.content.replace('[DeepThink]', '').strip()
+
+        preprocessing_coro = _execute_deepthink_preprocessing(db, rate_limiter, request, actual_model_name, user_key_info, concurrency, anti_detection, file_storage, enable_anti_detection=False)
+
+        if request.stream:
+            final_streamer = stream_with_fast_failover if await should_use_fast_failover(db) else stream_with_failover
+            return StreamingResponse(
+                stream_with_preprocessing(preprocessing_coro, final_streamer, db, rate_limiter, request, actual_model_name, user_key_info),
+                media_type="text/event-stream"
+            )
+        else:
+            final_gemini_request = await preprocessing_coro
+            response_func = make_request_with_fast_failover if await should_use_fast_failover(db) else make_request_with_failover
+            response = await response_func(db, rate_limiter, final_gemini_request, request, actual_model_name, user_key_info)
+            return JSONResponse(content=response)
+
+    # Search Logic
+    search_config = db.get_search_config()
+    if search_config.get('enabled') and last_user_message and '[Search]' in last_user_message:
+        logger.info("Search mode activated")
+        for msg in request.messages:
+            if msg.role == 'user': msg.content = msg.content.replace('[Search]', '').strip()
+        
+        preprocessing_coro = execute_search_flow(db, rate_limiter, request, actual_model_name, user_key_info, anti_detection, file_storage, enable_anti_detection=False)
+
+        if request.stream:
+            final_streamer = stream_with_fast_failover if await should_use_fast_failover(db) else stream_with_failover
+            return StreamingResponse(
+                stream_with_preprocessing(preprocessing_coro, final_streamer, db, rate_limiter, request, actual_model_name, user_key_info),
+                media_type="text/event-stream"
+            )
+        else:
+            final_gemini_request = await preprocessing_coro
+            response_func = make_request_with_fast_failover if await should_use_fast_failover(db) else make_request_with_failover
+            response = await response_func(db, rate_limiter, final_gemini_request, request, actual_model_name, user_key_info)
+            return JSONResponse(content=response)
+    
+    # Regular flow
     gemini_request = openai_to_gemini(db, request, anti_detection, file_storage, enable_anti_detection=True)
 
     stream_mode = db.get_stream_mode_config().get('mode', 'auto')
@@ -333,28 +388,19 @@ async def chat_completions(
     decryption_enabled = db.get_response_decryption_config().get('enabled', False)
     anti_truncation_enabled = db.get_anti_truncation_config().get('enabled', False)
 
-    # If user requests stream but a feature requires non-stream processing from Gemini
-    # (e.g., decryption, tools, anti-truncation), use the keep-alive streaming method.
     if request.stream and (decryption_enabled or has_tool_calls or anti_truncation_enabled):
         return StreamingResponse(stream_non_stream_keep_alive(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
 
-    # Determine final stream status based on config and user request for true streaming cases
     should_stream = request.stream
-    if stream_mode == 'stream':
-        should_stream = True
-    elif stream_mode == 'non_stream':
-        should_stream = False
+    if stream_mode == 'stream': should_stream = True
+    elif stream_mode == 'non_stream': should_stream = False
 
     if should_stream:
-        if await should_use_fast_failover(db):
-            return StreamingResponse(stream_with_fast_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
-        else:
-            return StreamingResponse(stream_with_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
+        streamer = stream_with_fast_failover if await should_use_fast_failover(db) else stream_with_failover
+        return StreamingResponse(streamer(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info), media_type="text/event-stream")
     else:
-        if await should_use_fast_failover(db):
-            response = await make_request_with_fast_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info)
-        else:
-            response = await make_request_with_failover(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info)
+        requester = make_request_with_fast_failover if await should_use_fast_failover(db) else make_request_with_failover
+        response = await requester(db, rate_limiter, gemini_request, request, actual_model_name, user_key_info)
         return JSONResponse(content=response)
 
 @router.get("/v1/models", summary="列出可用模型", tags=["用户 API"])
@@ -597,13 +643,27 @@ async def get_model_config_endpoint(model_name: str, db: Database = Depends(get_
 
 @admin_router.post("/models/{model_name}", summary="更新模型配置")
 async def update_model_config_endpoint(model_name: str, request: dict, db: Database = Depends(get_db)):
-    allowed = ['single_api_rpm_limit', 'single_api_tpm_limit', 'single_api_rpd_limit', 'status']
+    allowed = ['display_name', 'single_api_rpm_limit', 'single_api_tpm_limit', 'single_api_rpd_limit', 'status']
     update_data = {k: v for k, v in request.items() if k in allowed}
+
+    # 验证 display_name
+    if 'display_name' in update_data and not update_data['display_name'].strip():
+        update_data['display_name'] = None  # 如果为空或只有空格，则设置为NULL
+
     if not update_data:
         raise HTTPException(422, "No valid fields to update")
-    if db.update_model_config(model_name, **update_data):
-        return {"success": True, "message": "Model config updated"}
-    raise HTTPException(500, "Failed to update model config")
+    
+    try:
+        if db.update_model_config(model_name, **update_data):
+            return {"success": True, "message": "Model config updated"}
+        else:
+            # rowcount 为 0 可能意味着模型不存在
+            raise HTTPException(404, "Model not found or no changes made")
+    except Exception as e:
+        # 捕获可能的数据库唯一性约束错误
+        if "UNIQUE constraint failed" in str(e):
+            raise HTTPException(400, "Display name already exists.")
+        raise HTTPException(500, f"Failed to update model config: {e}")
 
 @admin_router.get("/config", summary="获取所有系统配置")
 async def get_all_config_endpoint(db: Database = Depends(get_db)):
@@ -618,6 +678,8 @@ async def get_all_config_endpoint(db: Database = Depends(get_db)):
         "anti_detection_config": {'enabled': db.get_config('anti_detection_enabled', 'true').lower() == 'true'},
         "stream_mode_config": db.get_stream_mode_config(),
         "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
+        "deepthink_config": db.get_deepthink_config(),
+        "search_config": db.get_search_config(),
     }
 
 @admin_router.post("/config/thinking", summary="更新思考模式配置")
@@ -648,6 +710,31 @@ async def update_stream_to_gemini_mode_config_endpoint(request: dict, db: Databa
     db.set_stream_to_gemini_mode_config(mode=request.get("mode"))
     return {"success": True, "message": "Config updated"}
 
+@admin_router.get("/config/deepthink", summary="获取DeepThink配置")
+async def get_deepthink_config_endpoint(db: Database = Depends(get_db)):
+    return {"success": True, "config": db.get_deepthink_config()}
+
+@admin_router.post("/config/deepthink", summary="更新DeepThink配置")
+async def update_deepthink_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_deepthink_config(
+        enabled=request.get('enabled'),
+        concurrency=request.get('concurrency')
+    )
+    return {"success": True, "message": "Config updated"}
+
+@admin_router.get("/config/search", summary="获取搜索配置")
+async def get_search_config_endpoint(db: Database = Depends(get_db)):
+    return {"success": True, "config": db.get_search_config()}
+
+@admin_router.post("/config/search", summary="更新搜索配置")
+async def update_search_config_endpoint(request: dict, db: Database = Depends(get_db)):
+    db.set_search_config(
+        enabled=request.get('enabled'),
+        num_queries=request.get('num_queries'),
+        num_pages_per_query=request.get('num_pages_per_query')
+    )
+    return {"success": True, "message": "Config updated"}
+
 @admin_router.post("/config/load-balance", summary="更新负载均衡策略")
 async def update_load_balance_config_endpoint(request: dict, db: Database = Depends(get_db)):
     strategy = request.get('load_balance_strategy')
@@ -676,7 +763,9 @@ async def get_admin_stats_endpoint(db: Database = Depends(get_db), anti_detectio
         "anti_detection_stats": anti_detection.get_statistics(),
         "stream_mode_config": db.get_stream_mode_config(),
         "stream_to_gemini_mode_config": db.get_stream_to_gemini_mode_config(),
-        "failover_config": db.get_failover_config()
+        "failover_config": db.get_failover_config(),
+        "deepthink_config": db.get_deepthink_config(),
+        "search_config": db.get_search_config()
     }
 
 

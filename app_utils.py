@@ -277,3 +277,18 @@ def get_hourly_stats():
 def get_recent_logs(limit: int = 100):
     """获取最近的请求日志"""
     return call_api(f'/admin/logs/recent?limit={limit}')
+
+
+@st.cache_data(ttl=60)
+def get_cached_deepthink_config():
+    return call_api('/admin/config/deepthink', 'GET')
+
+def update_deepthink_config(data):
+    return call_api('/admin/config/deepthink', 'POST', data)
+
+@st.cache_data(ttl=60)
+def get_cached_search_config():
+    return call_api('/admin/config/search', 'GET')
+
+def update_search_config(data):
+    return call_api('/admin/config/search', 'POST', data)
