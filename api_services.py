@@ -7,7 +7,7 @@ import logging
 import os
 import copy
 import itertools
-from typing import Dict, List, Optional, AsyncGenerator, Any
+from typing import Coroutine, Dict, List, Optional, AsyncGenerator, Any
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
@@ -932,7 +932,7 @@ async def _keep_alive_generator(task: asyncio.Task) -> AsyncGenerator[bytes, Any
 
 
 async def stream_with_preprocessing(
-    preprocessing_coro: asyncio.coroutine,
+    preprocessing_coro: Coroutine,
     streaming_func: callable,
     db: Database,
     rate_limiter: RateLimitCache,
