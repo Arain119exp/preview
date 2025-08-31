@@ -8,6 +8,8 @@ import os
 import copy
 import itertools
 from typing import Coroutine, Dict, List, Optional, AsyncGenerator, Any
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
@@ -17,7 +19,7 @@ from google.genai import types
 from fastapi import HTTPException
 
 from database import Database
-from api_models import ChatCompletionRequest
+from api_models import ChatCompletionRequest, ChatMessage
 from api_utils import get_cached_client, map_finish_reason, decrypt_response, check_gemini_key_health, RateLimitCache, openai_to_gemini
 
 logger = logging.getLogger(__name__)
@@ -2103,7 +2105,12 @@ async def execute_search_flow(
     # 4. 构建最终提示
     scraped_context = "\n\n".join([f"--- Scraped Content from URL {i+1} ---\n{content}" for i, content in enumerate(contents)])
     
+    # 获取并格式化当前的北京时间
+    beijing_time = datetime.now(ZoneInfo("Asia/Shanghai")).strftime('%Y-%m-%d %H:%M:%S')
+    
     synthesis_prompt = f"""
+    Current Beijing Time: {beijing_time}
+
     Based on the user's original request and the following scraped web content, provide a comprehensive answer.
 
     Original Request: "{original_user_prompt}"
@@ -2116,7 +2123,7 @@ async def execute_search_flow(
     """
     
     # 更新原始请求的消息
-    original_request.messages.append({"role": "user", "content": synthesis_prompt})
+    original_request.messages.append(ChatMessage(role="user", content=synthesis_prompt))
     
     # 重新生成gemini_request
     gemini_request = openai_to_gemini(db, original_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)

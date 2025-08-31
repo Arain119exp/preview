@@ -345,9 +345,9 @@ async def chat_completions(
     
     # DeepThink Logic
     deepthink_config = db.get_deepthink_config()
-    if deepthink_config.get('enabled') and last_user_message and '[DeepThink' in last_user_message:
+    if deepthink_config.get('enabled') and last_user_message and '[deepthink' in last_user_message.lower():
         concurrency = deepthink_config.get('concurrency', 3)
-        match = re.search(r'\[DeepThink:(\d+)\]', last_user_message)
+        match = re.search(r'\[deepthink:(\d+)\]', last_user_message, re.IGNORECASE)
         if match:
             custom_concurrency = int(match.group(1))
             if 3 <= custom_concurrency <= 7: concurrency = custom_concurrency
@@ -355,7 +355,7 @@ async def chat_completions(
                 if msg.role == 'user': msg.content = msg.content.replace(match.group(0), '').strip()
         else:
             for msg in request.messages:
-                if msg.role == 'user': msg.content = msg.content.replace('[DeepThink]', '').strip()
+                if msg.role == 'user': msg.content = re.sub(r'\[deepthink\]', '', msg.content, flags=re.IGNORECASE).strip()
 
         preprocessing_coro = _execute_deepthink_preprocessing(db, rate_limiter, request, actual_model_name, user_key_info, concurrency, anti_detection, file_storage, enable_anti_detection=False)
 
@@ -373,10 +373,10 @@ async def chat_completions(
 
     # Search Logic
     search_config = db.get_search_config()
-    if search_config.get('enabled') and last_user_message and '[Search]' in last_user_message:
+    if search_config.get('enabled') and last_user_message and '[search]' in last_user_message.lower():
         logger.info("Search mode activated")
         for msg in request.messages:
-            if msg.role == 'user': msg.content = msg.content.replace('[Search]', '').strip()
+            if msg.role == 'user': msg.content = re.sub(r'\[search\]', '', msg.content, flags=re.IGNORECASE).strip()
         
         preprocessing_coro = execute_search_flow(db, rate_limiter, request, actual_model_name, user_key_info, anti_detection, file_storage, enable_anti_detection=False)
 

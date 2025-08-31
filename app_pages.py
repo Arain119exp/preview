@@ -229,8 +229,8 @@ def render_dashboard_page():
     st.markdown("### 最近请求统计")
     hourly_data = get_hourly_stats()
 
-    # 创建一个包含过去24小时的完整时间序列
-    now = pd.to_datetime('now', utc=True)
+    # 创建一个包含过去24小时的完整时间序列 (北京时间)
+    now = pd.Timestamp.now(tz='Asia/Shanghai')
     hours_24_ago = now - pd.Timedelta(hours=23)
     full_hour_range = pd.date_range(start=hours_24_ago.floor('h'), end=now.floor('h'), freq='h')
     df_full_range = pd.DataFrame(full_hour_range, columns=['hour'])
@@ -238,7 +238,8 @@ def render_dashboard_page():
     if hourly_data and hourly_data.get("success") and hourly_data.get("stats"):
         stats = hourly_data["stats"]
         df_hourly = pd.DataFrame(stats)
-        df_hourly['hour'] = pd.to_datetime(df_hourly['hour'])
+        # 确保数据库中的UTC时间转换为北京时间
+        df_hourly['hour'] = pd.to_datetime(df_hourly['hour'], utc=True).dt.tz_convert('Asia/Shanghai')
         
         # 合并数据，填充缺失值
         df_hourly = pd.merge(df_full_range, df_hourly, on='hour', how='left').fillna(0)
@@ -319,7 +320,7 @@ def render_dashboard_page():
         with st.expander("最近请求记录"):
             logs = recent_logs_data["logs"]
             df_logs = pd.DataFrame(logs)
-            df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp'], utc=True).dt.tz_convert('Asia/Shanghai').dt.strftime('%Y-%m-%d %H:%M:%S')
             
             # 重命名字段以便显示
             df_logs.rename(columns={
