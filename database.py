@@ -326,6 +326,8 @@ class Database:
 
             # 搜索功能配置
             ('search_enabled', 'false', '启用搜索模式进行网页抓取'),
+            ('search_num_queries', '3', '搜索查询次数'),
+            ('search_num_pages_per_query', '3', '每次查询的页面数'),
         ]
 
         for key, value, description in default_configs:
@@ -686,16 +688,22 @@ class Database:
         try:
             return {
                 'enabled': self.get_config('search_enabled', 'false').lower() == 'true',
+                'num_queries': int(self.get_config('search_num_queries', '3')),
+                'num_pages_per_query': int(self.get_config('search_num_pages_per_query', '3')),
             }
         except Exception as e:
             logger.error(f"Failed to get search config: {e}")
-            return {'enabled': False}
+            return {'enabled': False, 'num_queries': 3, 'num_pages_per_query': 3}
 
-    def set_search_config(self, enabled: bool = None) -> bool:
+    def set_search_config(self, enabled: bool = None, num_queries: int = None, num_pages_per_query: int = None) -> bool:
         """设置搜索配置"""
         try:
             if enabled is not None:
                 self.set_config('search_enabled', 'true' if enabled else 'false')
+            if num_queries is not None:
+                self.set_config('search_num_queries', str(num_queries))
+            if num_pages_per_query is not None:
+                self.set_config('search_num_pages_per_query', str(num_pages_per_query))
 
             return True
         except Exception as e:

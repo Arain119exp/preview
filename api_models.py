@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Union, Any
 # 思考配置模型
 class ThinkingConfig(BaseModel):
     thinking_budget: Optional[int] = None  # 0-32768, 0=禁用思考, None=自动
-    include_thoughts: Optional[bool] = False  # 是否在响应中包含思考过程
+    include_thoughts: Optional[bool] = True  # 是否在响应中包含思考过程
 
     class Config:
         extra = "allow"
