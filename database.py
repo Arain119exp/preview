@@ -27,21 +27,22 @@ class Database:
                 db_path = "gemini_proxy.db"
 
         self.db_path = db_path
-        self.local = threading.local()
 
         # 初始化数据库
         self.init_db()
 
     @contextmanager
     def get_connection(self):
-        if not hasattr(self.local, 'conn'):
-            self.local.conn = sqlite3.connect(self.db_path)
-            self.local.conn.row_factory = sqlite3.Row
-            # 设置WAL模式以提高并发性能
-            self.local.conn.execute("PRAGMA journal_mode=WAL")
-            self.local.conn.execute("PRAGMA synchronous=NORMAL")
-            self.local.conn.execute("PRAGMA cache_size=1000")
-        yield self.local.conn
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        # 设置WAL模式以提高并发性能
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=1000")
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def init_db(self):
         with self.get_connection() as conn:
