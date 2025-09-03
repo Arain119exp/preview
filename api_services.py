@@ -2198,7 +2198,7 @@ async def create_embeddings(
 
         embeddings = result.embeddings
         embedding_data = [
-            EmbeddingData(embedding=[e.values], index=i)
+            EmbeddingData(embedding=e.values, index=i)
             for i, e in enumerate(embeddings)
         ]
 
