@@ -20,6 +20,7 @@ from database import Database
 from api_models import (ChatCompletionRequest, ChatMessage, EmbeddingRequest, EmbeddingResponse, EmbeddingData, EmbeddingUsage,
                           GeminiEmbeddingRequest, GeminiEmbeddingResponse, EmbeddingValue)
 from api_utils import get_cached_client, map_finish_reason, decrypt_response, check_gemini_key_health, RateLimitCache, openai_to_gemini
+import copy
 
 logger = logging.getLogger(__name__)
 
@@ -2311,3 +2312,77 @@ async def create_gemini_native_embeddings(
         
         logger.error(f"Native embedding creation failed for key #{key_info['id']}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _execute_deepthink_preprocessing(
+    db: Database,
+    rate_limiter: RateLimitCache,
+    original_request: ChatCompletionRequest,
+    model_name: str,
+    user_key_info: Dict,
+    concurrency: int,
+    anti_detection: Any,
+    file_storage: Dict,
+    enable_anti_detection: bool = False
+) -> Dict:
+    """DeepThink的预处理部分，返回最终的gemini_request"""
+    original_user_prompt = next((m.content for m in original_request.messages if m.role == 'user'), '')
+    if not original_user_prompt:
+        raise HTTPException(status_code=400, detail="User prompt is missing.")
+
+    # 1. 生成N个新Prompt
+    prompt_generation_request = {
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": f"Based on the user's request, generate {concurrency} distinct and diverse thinking prompts to explore the problem from different angles. Return the prompts as a JSON array of strings. User request: \"{original_user_prompt}\""
+            }]
+        }],
+        "generation_config": { "temperature": 0.5, "maxOutputTokens": 2048, "response_mime_type": "application/json" }
+    }
+    
+    try:
+        temp_request = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": "generate prompts"}])
+        response = await make_request_with_fast_failover(db, rate_limiter, prompt_generation_request, temp_request, model_name, user_key_info, _internal_call=True)
+        prompts = json.loads(response['choices'][0]['message']['content'])
+        if not isinstance(prompts, list) or len(prompts) != concurrency:
+            raise ValueError(f"Failed to generate {concurrency} valid prompts.")
+    except Exception as e:
+        logger.error(f"DeepThink prompt generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate thinking prompts.")
+
+    # 2. 并发执行
+    async def run_prompt(prompt):
+        gemini_request = openai_to_gemini(ChatCompletionRequest(model=original_request.model, messages=[ChatMessage(role="user", content=prompt)]), db, anti_detection, file_storage, enable_anti_detection)
+        request_body = {"contents": gemini_request["contents"], "generation_config": gemini_request.get("generation_config")}
+        try:
+            temp_req = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": prompt}])
+            response = await make_request_with_fast_failover(db, rate_limiter, request_body, temp_req, model_name, user_key_info, _internal_call=True)
+            return response['choices'][0]['message']['content']
+        except Exception as e:
+            logger.error(f"DeepThink sub-request failed for prompt '{prompt}': {e}")
+            return f"Error processing sub-request: {e}"
+
+    tasks = [run_prompt(p) for p in prompts]
+    answers = await asyncio.gather(*tasks)
+
+    # 3. 综合提炼
+    explorations = "\n\n".join([f"Exploration {i+1}:\n\"{answer}\"" for i, answer in enumerate(answers)])
+    synthesis_prompt = f'Original user request: "{original_user_prompt}"\n\nBased on the original request and the following {concurrency} independent explorations, synthesize a final, high-quality answer.\n\n{explorations}\n\nSynthesized Answer:'
+    
+    # 更新原始请求以包含综合提示
+    final_request_messages = copy.deepcopy(original_request.messages)
+    # 替换或追加综合提示
+    found_user = False
+    for msg in reversed(final_request_messages):
+        if msg.role == 'user':
+            msg.content = synthesis_prompt
+            found_user = True
+            break
+    if not found_user:
+         final_request_messages.append(ChatMessage(role="user", content=synthesis_prompt))
+
+    final_openai_request = original_request.copy(update={"messages": final_request_messages})
+    
+    # 4. 返回最终的gemini_request
+    return openai_to_gemini(db, final_openai_request, anti_detection, file_storage, enable_anti_detection=enable_anti_detection)
