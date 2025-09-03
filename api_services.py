@@ -2138,7 +2138,7 @@ async def execute_search_flow(
     )
 
     # 5. Modify the original request to include the new context-aware prompt
-    final_gemini_request = openai_to_gemini(original_request, db, anti_detection, file_storage, enable_anti_detection)
+    final_gemini_request = openai_to_gemini(db, original_request, anti_detection, file_storage, enable_anti_detection)
     
     if final_gemini_request['contents']:
         for part in reversed(final_gemini_request['contents']):
