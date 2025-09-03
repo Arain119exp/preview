@@ -2001,6 +2001,7 @@ async def _get_search_plan_from_ai(
     original_request: ChatCompletionRequest,
     original_user_prompt: str,
     user_key_info: Dict,
+    anti_detection: Any,
 ) -> Optional[Dict]:
     """
     Calls the AI to generate a search plan (queries and pages).
@@ -2036,7 +2037,7 @@ async def _get_search_plan_from_ai(
             messages=[ChatMessage(role="user", content=planning_prompt)]
         )
         
-        planning_gemini_request = openai_to_gemini(planning_openai_request, db, None, {}, False)
+        planning_gemini_request = openai_to_gemini(db, planning_openai_request, anti_detection, {}, False)
 
         # Make the internal call. _internal_call=True bypasses some logging/features.
         response_dict = await make_request_with_fast_failover(
@@ -2092,7 +2093,7 @@ async def execute_search_flow(
     logger.info(f"Starting AI-driven search flow for prompt: '{original_user_prompt}'")
 
     # 1. Get search plan from AI
-    search_plan = await _get_search_plan_from_ai(db, rate_limiter, original_request, original_user_prompt, user_key_info)
+    search_plan = await _get_search_plan_from_ai(db, rate_limiter, original_request, original_user_prompt, user_key_info, anti_detection)
 
     search_tasks_to_run = []
     if search_plan and search_plan.get('search_tasks'):

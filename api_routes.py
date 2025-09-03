@@ -730,7 +730,6 @@ async def update_model_config_endpoint(model_name: str, request: dict, db: Datab
 
 @admin_router.get("/config", summary="获取所有系统配置")
 async def get_all_config_endpoint(db: Database = Depends(get_db)):
-    # This is the line that caused the 500 error, now fixed.
     return {
         "success": True,
         "system_configs": db.get_all_configs(),
