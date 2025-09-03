@@ -1651,24 +1651,13 @@ def render_system_settings_page():
         if deepthink_data and deepthink_data.get('success'):
             current_config = deepthink_data.get('config', {})
             current_enabled = current_config.get('enabled', False)
-            current_concurrency = current_config.get('concurrency', 3)
 
             with st.form("deepthink_form"):
-                enabled = st.checkbox("启用 DeepThink 功能", value=current_enabled, help="开启后，包含 [DeepThink] 关键词的请求将触发多步推理流程")
-                
-                concurrency = st.number_input(
-                    "默认并发数",
-                    min_value=3,
-                    max_value=7,
-                    value=current_concurrency,
-                    step=1,
-                    help="设置DeepThink模式的默认并发请求数（3-7）。用户可在请求中通过 [DeepThink:N] 覆盖此设置。"
-                )
+                enabled = st.checkbox("启用 DeepThink 功能", value=current_enabled, help="开启后，包含 [deepthink] 关键词的请求将触发“反思式”多步推理流程")
 
                 if st.form_submit_button("保存 DeepThink 配置", type="primary", use_container_width=True):
                     update_data = {
-                        'enabled': enabled,
-                        'concurrency': concurrency
+                        'enabled': enabled
                     }
                     result = update_deepthink_config(update_data)
                     if result and result.get('success'):

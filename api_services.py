@@ -2333,62 +2333,139 @@ async def _execute_deepthink_preprocessing(
     file_storage: Dict,
     enable_anti_detection: bool = False
 ) -> Dict:
-    """DeepThink的预处理部分，返回最终的gemini_request"""
+    """
+    执行完整的“反思式DeepThink”流程，返回最终的gemini_request。
+    流程: 探索 -> 初步综合 -> 反思与二次规划 -> 最终综合
+    """
     original_user_prompt = next((m.content for m in original_request.messages if m.role == 'user'), '')
     if not original_user_prompt:
         raise HTTPException(status_code=400, detail="User prompt is missing.")
 
-    # 1. 生成N个新Prompt
-    prompt_generation_request = {
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "text": f"Based on the user's request, generate {concurrency} distinct and diverse thinking prompts to explore the problem from different angles. Return the prompts as a JSON array of strings. User request: \"{original_user_prompt}\""
-            }]
-        }],
-        "generation_config": { "temperature": 0.5, "maxOutputTokens": 2048, "response_mime_type": "application/json" }
-    }
-    
-    try:
-        temp_request = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": "generate prompts"}])
-        response = await make_request_with_fast_failover(db, rate_limiter, prompt_generation_request, temp_request, model_name, user_key_info, _internal_call=True)
-        prompts = json.loads(response['choices'][0]['message']['content'])
-        if not isinstance(prompts, list) or len(prompts) != concurrency:
-            raise ValueError(f"Failed to generate {concurrency} valid prompts.")
-    except Exception as e:
-        logger.error(f"DeepThink prompt generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate thinking prompts.")
-
-    # 2. 并发执行
-    async def run_prompt(prompt):
-        gemini_request = openai_to_gemini(ChatCompletionRequest(model=original_request.model, messages=[ChatMessage(role="user", content=prompt)]), db, anti_detection, file_storage, enable_anti_detection)
-        request_body = {"contents": gemini_request["contents"], "generation_config": gemini_request.get("generation_config")}
+    # 内部辅助函数，用于执行子请求
+    async def _execute_sub_request(prompt: str, is_json: bool = False):
         try:
-            temp_req = ChatCompletionRequest(model=original_request.model, messages=[{"role": "user", "content": prompt}])
-            response = await make_request_with_fast_failover(db, rate_limiter, request_body, temp_req, model_name, user_key_info, _internal_call=True)
-            return response['choices'][0]['message']['content']
+            temp_req = ChatCompletionRequest(model=original_request.model, messages=[ChatMessage(role="user", content=prompt)])
+            gemini_req_body = openai_to_gemini(temp_req, db, anti_detection, file_storage, enable_anti_detection)
+            if is_json:
+                if "generation_config" not in gemini_req_body: gemini_req_body["generation_config"] = {}
+                gemini_req_body["generation_config"]["response_mime_type"] = "application/json"
+
+            response = await make_request_with_fast_failover(db, rate_limiter, gemini_req_body, temp_req, model_name, user_key_info, _internal_call=True)
+            content = response['choices'][0]['message']['content']
+            return json.loads(content) if is_json else content
         except Exception as e:
-            logger.error(f"DeepThink sub-request failed for prompt '{prompt}': {e}")
-            return f"Error processing sub-request: {e}"
+            logger.error(f"DeepThink sub-request failed for prompt '{prompt[:100]}...': {e}")
+            return {"error": str(e)} if is_json else f"Error processing sub-request: {e}"
 
-    tasks = [run_prompt(p) for p in prompts]
-    answers = await asyncio.gather(*tasks)
+    # 内部辅助函数，用于执行搜索或推理
+    async def _run_exploration_prompt(prompt: str):
+        prompt = prompt.strip()
+        if prompt.lower().startswith('[search]'):
+            search_query = prompt[len('[search]'):].strip()
+            logger.info(f"DeepThink is executing a search for: '{search_query}'")
+            try:
+                search_result = await search_duckduckgo_and_scrape(search_query, num_results=3)
+                return f"Search results for '{search_query}':\n{search_result}" if search_result else f"No search results found for '{search_query}'."
+            except Exception as e:
+                logger.error(f"DeepThink sub-search failed for query '{search_query}': {e}")
+                return f"Error during search for '{search_query}': {e}"
+        else:
+            return await _execute_sub_request(prompt)
 
-    # 3. 综合提炼
-    explorations = "\n\n".join([f"Exploration {i+1}:\n\"{answer}\"" for i, answer in enumerate(answers)])
-    synthesis_prompt = f'Original user request: "{original_user_prompt}"\n\nBased on the original request and the following {concurrency} independent explorations, synthesize a final, high-quality answer.\n\n{explorations}\n\nSynthesized Answer:'
+    # --- 阶段一：并行探索 ---
+    logger.info("--- DeepThink Phase 1: Parallel Exploration ---")
+    prompt_gen_prompt = f"Based on the user's request, generate {concurrency} distinct and diverse thinking prompts to explore the problem from different angles. If a prompt requires real-time information or external data, include the keyword `[search]` at the beginning of that prompt string. Return the prompts as a JSON array of strings. User request: \"{original_user_prompt}\""
+    initial_prompts = await _execute_sub_request(prompt_gen_prompt, is_json=True)
+    if isinstance(initial_prompts, dict) and "error" in initial_prompts:
+        raise HTTPException(status_code=500, detail=f"Failed to generate initial prompts: {initial_prompts['error']}")
+    if not isinstance(initial_prompts, list):
+        raise HTTPException(status_code=500, detail="Initial prompt generation did not return a list.")
+
+    exploration_tasks = [_run_exploration_prompt(p) for p in initial_prompts]
+    exploration_results = await asyncio.gather(*exploration_tasks)
+    exploration_context = "\n\n".join([f"Exploration Result {i+1}:\n---\n{result}\n---" for i, result in enumerate(exploration_results)])
+
+    # --- 阶段二：初步综合与自我反思 ---
+    # 2.1 初步综合 (Drafting)
+    logger.info("--- DeepThink Phase 2.1: Initial Synthesis (Drafting) ---")
+    drafting_prompt = f"Original user request: \"{original_user_prompt}\"\n\nBased on the following exploration results, synthesize a comprehensive and well-structured 'preliminary answer draft'.\n\n{exploration_context}\n\nPreliminary Answer Draft:"
+    draft_answer = await _execute_sub_request(drafting_prompt)
+    if "Error processing sub-request" in draft_answer:
+        raise HTTPException(status_code=500, detail="Failed to create initial draft.")
+
+    # 2.2 批判性反思与二次规划 (Self-Correction)
+    logger.info("--- DeepThink Phase 2.2: Critical Reflection & Secondary Planning ---")
+    reflection_prompt = f"""
+    You are a 'Reflector AI'. Your task is to critically analyze a preliminary answer and plan for its improvement.
     
-    # 更新原始请求以包含综合提示
+    User's Original Request: "{original_user_prompt}"
+    
+    Preliminary Answer Draft:
+    ---
+    {draft_answer}
+    ---
+    
+    Your Tasks:
+    1.  **Analyze & Critique**: Evaluate the draft. Is it complete? Does it have logical gaps? Is the information sufficient?
+    2.  **Propose Improvements**: Clearly state what is missing or could be improved.
+    3.  **Plan Secondary Exploration**: Based on your critique, generate exactly 2 new, targeted exploration prompts to gather the missing information. If a prompt needs web search, prefix it with `[search]`.
+    
+    Return your response as a JSON object with three keys: "critique", "improvements", and "new_prompts" (which should be an array of 2 strings).
+    Example: {{ "critique": "...", "improvements": "...", "new_prompts": ["[search] latest market trends for AI", "Explain the technical challenges of..."] }}
+    """
+    reflection_result = await _execute_sub_request(reflection_prompt, is_json=True)
+    if isinstance(reflection_result, dict) and "error" in reflection_result:
+        raise HTTPException(status_code=500, detail=f"Failed during reflection stage: {reflection_result['error']}")
+    if not all(k in reflection_result for k in ["critique", "improvements", "new_prompts"]):
+        raise HTTPException(status_code=500, detail="Reflection stage returned malformed JSON.")
+
+    # --- 阶段三：最终答案生成 ---
+    # 3.1 二次探索
+    logger.info("--- DeepThink Phase 3.1: Secondary Exploration ---")
+    secondary_prompts = reflection_result.get("new_prompts", [])
+    secondary_tasks = [_run_exploration_prompt(p) for p in secondary_prompts]
+    secondary_results = await asyncio.gather(*secondary_tasks)
+    secondary_context = "\n\n".join([f"Secondary Exploration Result {i+1}:\n---\n{result}\n---" for i, result in enumerate(secondary_results)])
+
+    # 3.2 最终综合 (Finalization)
+    logger.info("--- DeepThink Phase 3.2: Final Synthesis ---")
+    final_synthesis_prompt = f"""
+    Your task is to generate a final, high-quality answer by integrating all available information.
+    
+    1.  **User's Original Request**: "{original_user_prompt}"
+    
+    2.  **Preliminary Draft**:
+        ---
+        {draft_answer}
+        ---
+        
+    3.  **Critique and Improvements Suggested**:
+        - Critique: {reflection_result.get('critique')}
+        - Improvements: {reflection_result.get('improvements')}
+        
+    4.  **Additional Information from Secondary Exploration**:
+        ---
+        {secondary_context}
+        ---
+        
+    Instructions:
+    - Revise and enhance the preliminary draft using the critique and the new information.
+    - Ensure the final answer is comprehensive, accurate, and directly addresses the user's original request.
+    - Produce only the final, polished answer without any extra commentary.
+    
+    Final Answer:
+    """
+    
+    # 更新原始请求以包含最终的综合提示
     final_request_messages = copy.deepcopy(original_request.messages)
-    # 替换或追加综合提示
     found_user = False
     for msg in reversed(final_request_messages):
         if msg.role == 'user':
-            msg.content = synthesis_prompt
+            msg.content = final_synthesis_prompt
             found_user = True
             break
     if not found_user:
-         final_request_messages.append(ChatMessage(role="user", content=synthesis_prompt))
+         final_request_messages.append(ChatMessage(role="user", content=final_synthesis_prompt))
 
     final_openai_request = original_request.copy(update={"messages": final_request_messages})
     
