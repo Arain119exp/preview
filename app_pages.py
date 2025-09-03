@@ -108,8 +108,8 @@ def render_dashboard_page():
 
             model_config_data = get_cached_model_config(model)
             if not model_config_data:
-                rpm_limit = 15 if 'flash-lite' in model else (10 if 'flash' in model else 5)
-                rpd_limit = 1000 if 'flash-lite' in model else (250 if 'flash' in model else 100)
+                rpm_limit = 100 if 'embedding' in model else (15 if 'flash-lite' in model else (10 if 'flash' in model else 5))
+                rpd_limit = 1000 if 'embedding' in model else (1000 if 'flash-lite' in model else (250 if 'flash' in model else 100))
             else:
                 rpm_limit = model_config_data.get('total_rpm_limit', 10)
                 rpd_limit = model_config_data.get('total_rpd_limit', 250)
@@ -737,7 +737,7 @@ def render_model_config_page():
                 rpm = st.number_input(
                     "RPM (每分钟请求)",
                     min_value=1,
-                    value=current_config.get('single_api_rpm_limit', 15 if 'flash-lite' in model else (10 if 'flash' in model else 5)),
+                    value=current_config.get('single_api_rpm_limit', 100 if 'embedding' in model else (15 if 'flash-lite' in model else (10 if 'flash' in model else 5))),
                     key=f"rpm_{model}"
                 )
 
@@ -745,7 +745,7 @@ def render_model_config_page():
                 rpd = st.number_input(
                     "RPD (每日请求)",
                     min_value=1,
-                    value=current_config.get('single_api_rpd_limit', 1000 if 'flash-lite' in model else (250 if 'flash' in model else 100)),
+                    value=current_config.get('single_api_rpd_limit', 1000 if 'embedding' in model else (1000 if 'flash-lite' in model else (250 if 'flash' in model else 100))),
                     key=f"rpd_{model}"
                 )
 
@@ -822,7 +822,7 @@ def render_system_settings_page():
                     <h5 style="margin: 0; color: #374151; font-size: 1.1rem;">当前状态</h5>
                     <p style="margin: 0.5rem 0 0 0; color: #6b7280; font-size: 0.9rem;">
                         思考预算: {thinking_config.get('budget', -1)} | 
-                        包含过程: {'是' if thinking_config.get('include_thoughts', False) else '否'}
+                        包含过程: {'是' if thinking_config.get('include_thoughts', True) else '否'}
                     </p>
                 </div>
                 <div style="background: {status_color}; color: white; padding: 0.5rem 1rem; border-radius: 8px; font-weight: 500;">
@@ -1521,10 +1521,10 @@ def render_system_settings_page():
         search_data = get_cached_search_config()
         
         # Calculate statuses
-        anti_detection_enabled = anti_detection_data.get('config', {}).get('anti_detection_enabled', False) if anti_detection_data else False
-        trunc_enabled = trunc_conf.get('anti_truncation_enabled', False) if trunc_conf is not None else False
+        anti_detection_enabled = anti_detection_data.get('anti_detection_enabled', False) if anti_detection_data and anti_detection_data.get('success') else False
+        trunc_enabled = trunc_conf.get('config', {}).get('enabled', False) if trunc_conf and trunc_conf.get('success') else False
         
-        decryption_enabled = decryption_config.get('enabled', False) if decryption_config and decryption_config.get('success') else False
+        decryption_enabled = decryption_config.get('config', {}).get('enabled', False) if decryption_config and decryption_config.get('success') else False
         inject_config = stats_data.get('inject_config', {})
         encryption_prompt = "【输出加密指令】\n请正常生成你的完整回复。然后，在最终输出时，请务必对你生成的全部内容应用以下加密算法，并只输出加密后的结果：\n1. 把每个字符按 UTF-32BE 编码为 8 位十六进制（大端，无 0x，补零）。\n2. 对该十六进制字符串逐字节与 0x5A 异或。\n3. 把异或后的 8 位十六进制串直接连在一起输出，不要空格或其他符号。"
         is_encryption_active = (inject_config.get('enabled', False) and inject_config.get('content', '') == encryption_prompt and decryption_enabled)
@@ -1565,7 +1565,7 @@ def render_system_settings_page():
         st.markdown("管理自动化检测防护功能")
         if anti_detection_data:
             anti_detection_config = anti_detection_data.get('config', {})
-            current_enabled = anti_detection_config.get('anti_detection_enabled', False)
+            current_enabled = anti_detection_config.get('anti_detection_enabled', True)
             current_disable_for_tools = anti_detection_config.get('disable_for_tools', True) 
             current_token_threshold = anti_detection_config.get('token_threshold', 5000)
             with st.form("anti_detection_form"):
@@ -1578,7 +1578,7 @@ def render_system_settings_page():
                 st.markdown("**高级配置**")
                 token_threshold = st.number_input("Token阈值", min_value=1000, max_value=50000, value=current_token_threshold, step=500, help="只有当消息token数超过此阈值时才应用防检测处理")
                 if st.form_submit_button("保存防检测配置", type="primary", use_container_width=True):
-                    update_data = {'enabled': enabled, 'disable_for_tools': disable_for_tools, 'token_threshold': token_threshold}
+                    update_data = {'anti_detection_enabled': enabled, 'disable_for_tools': disable_for_tools, 'token_threshold': token_threshold}
                     result = call_api('/admin/config/anti-detection', 'POST', data=update_data)
                     if result and result.get('success'):
                         st.success("防检测配置已更新")

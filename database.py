@@ -345,6 +345,7 @@ class Database:
             ('gemini-2.5-flash', 10, 250000, 250),  # 单API: RPM, TPM, RPD
             ('gemini-2.5-flash-lite', 15, 250000, 1000),  # 单API: RPM, TPM, RPD
             ('gemini-2.5-pro', 5, 250000, 100),  # 单API: RPM, TPM, RPD
+            ('gemini-embedding-001', 100, 30000, 1000), # 单API: RPM, TPM, RPD
         ]
 
         for model_name, rpm, tpm, rpd in default_models:
@@ -713,7 +714,7 @@ class Database:
     # 模型配置管理
     def get_supported_models(self) -> List[str]:
         """获取支持的模型列表"""
-        return ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro']
+        return ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro', 'gemini-embedding-001']
 
     def get_model_config(self, model_name: str) -> Optional[Dict]:
         """获取模型配置（包含计算的总限制）"""
