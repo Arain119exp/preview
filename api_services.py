@@ -1941,34 +1941,36 @@ async def cleanup_database_records(db: Database):
 
 # Add necessary imports for the new search function
 from bs4 import BeautifulSoup
-try:
-    from googlesearch import search
-except ImportError:
-    # This will be logged if the dependency is missing
-    pass
 
-async def search_google_and_scrape(query: str, num_results: int = 3):
+
+
+async def search_duckduckgo_and_scrape(query: str, num_results: int = 3):
     """
-    Performs a Google search, scrapes the top results, and returns a formatted string.
+    Performs a DuckDuckGo search, scrapes the top results, and returns a formatted string.
     """
-    logger.info(f"Starting Google search and scrape for query: '{query}'")
+    logger.info(f"Starting DuckDuckGo search and scrape for query: '{query}'")
     try:
-        # Run the synchronous search in a separate thread
-        loop = asyncio.get_event_loop()
-        urls = await loop.run_in_executor(
-            None,  # Uses the default thread pool executor
-            lambda: list(search(query, num_results=num_results, lang="zh-CN"))
-        )
+        api_url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
         
-        if not urls:
-            logger.warning(f"Google search for '{query}' returned no URLs.")
-            return ""
-
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        
+
         async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=10) as client:
+            response = await client.get(api_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            urls = [result['FirstURL'] for result in data.get('RelatedTopics', []) if 'FirstURL' in result][:num_results]
+            if not urls:
+                # Fallback to 'Results' if 'RelatedTopics' is empty
+                urls = [result['FirstURL'] for result in data.get('Results', []) if 'FirstURL' in result][:num_results]
+
+
+            if not urls:
+                logger.warning(f"DuckDuckGo search for '{query}' returned no URLs.")
+                return ""
+
             tasks = [client.get(url) for url in urls]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1978,12 +1980,10 @@ async def search_google_and_scrape(query: str, num_results: int = 3):
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 title = soup.title.string if soup.title else "No Title"
                 
-                # Extract paragraphs and join them to form a snippet
                 paragraphs = [p.get_text() for p in soup.find_all('p')]
-                snippet = ' '.join(paragraphs[:3]).strip() # First 3 paragraphs as snippet
+                snippet = ' '.join(paragraphs[:3]).strip()
                 
                 if snippet:
-                    # Format matches the old DuckDuckGo output for consistency
                     results.append(f"Source: {urls[i]}\nTitle: {title}\nContent: {snippet}")
             else:
                 logger.warning(f"Failed to fetch URL {urls[i]}: {resp}")
@@ -1992,8 +1992,9 @@ async def search_google_and_scrape(query: str, num_results: int = 3):
         return "\n\n".join(results)
 
     except Exception as e:
-        logger.error(f"Google search and scrape failed for query '{query}': {e}")
-        return "" # Return empty string on failure to not break the flow
+        logger.error(f"DuckDuckGo search and scrape failed for query '{query}': {e}")
+        return ""
+
 
 async def _get_search_plan_from_ai(
     db: Database,
@@ -2102,15 +2103,13 @@ async def execute_search_flow(
             query = task.get('query')
             num_pages = int(task.get('num_pages', 3))
             if query:
-                search_tasks_to_run.append(
-                    search_google_and_scrape(query, num_results=num_pages)
-                )
+                search_tasks_to_run.append(search_duckduckgo_and_scrape(query, num_results=num_pages))
     else:
         logger.warning("Failed to get AI search plan, falling back to default behavior.")
         search_config = db.get_search_config()
         num_pages = search_config.get('num_pages_per_query', 3)
         search_tasks_to_run.append(
-            search_google_and_scrape(original_user_prompt, num_results=num_pages)
+            search_duckduckgo_and_scrape(original_user_prompt, num_results=num_pages)
         )
 
     # 2. Concurrently perform searches and scrape results
