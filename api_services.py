@@ -1946,34 +1946,42 @@ from bs4 import BeautifulSoup
 
 async def search_duckduckgo_and_scrape(query: str, num_results: int = 3):
     """
-    Performs a DuckDuckGo search, scrapes the top results, and returns a formatted string.
+    Performs a DuckDuckGo WEB search, scrapes the top results, and returns a formatted string.
     """
-    logger.info(f"Starting DuckDuckGo search and scrape for query: '{query}'")
+    logger.info(f"Starting DuckDuckGo WEB search and scrape for query: '{query}'")
     try:
-        api_url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
+        # Use the HTML version of DuckDuckGo for easier parsing
+        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
 
         async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=10) as client:
-            response = await client.get(api_url)
+            # 1. Get the search results page
+            response = await client.get(search_url)
             response.raise_for_status()
-            data = response.json()
             
-            urls = [result['FirstURL'] for result in data.get('RelatedTopics', []) if 'FirstURL' in result][:num_results]
-            if not urls:
-                # Fallback to 'Results' if 'RelatedTopics' is empty
-                urls = [result['FirstURL'] for result in data.get('Results', []) if 'FirstURL' in result][:num_results]
+            # 2. Parse the search results to get URLs
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Find all result containers. This selector might need adjustment if DDG changes their layout.
+            results_container = soup.find_all('div', class_='web-result')
+            
+            urls = []
+            for res in results_container[:num_results]:
+                url_element = res.find('a', class_='result__url')
+                if url_element and url_element.get('href'):
+                    urls.append(url_element['href'])
 
-
             if not urls:
-                logger.warning(f"DuckDuckGo search for '{query}' returned no URLs.")
+                logger.warning(f"DuckDuckGo web search for '{query}' returned no URLs.")
                 return ""
 
+            # 3. Concurrently fetch content from the result URLs
             tasks = [client.get(url) for url in urls]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # 4. Parse content from each URL and create snippets
         results = []
         for i, resp in enumerate(responses):
             if isinstance(resp, httpx.Response):
@@ -1992,7 +2000,7 @@ async def search_duckduckgo_and_scrape(query: str, num_results: int = 3):
         return "\n\n".join(results)
 
     except Exception as e:
-        logger.error(f"DuckDuckGo search and scrape failed for query '{query}': {e}")
+        logger.error(f"DuckDuckGo web search and scrape failed for query '{query}': {e}")
         return ""
 
 
