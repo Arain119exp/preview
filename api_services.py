@@ -2347,8 +2347,11 @@ async def _execute_deepthink_preprocessing(
             temp_req = ChatCompletionRequest(model=original_request.model, messages=[ChatMessage(role="user", content=prompt)])
             gemini_req_body = openai_to_gemini(db, temp_req, anti_detection, file_storage, enable_anti_detection)
             if is_json:
-                if "generation_config" not in gemini_req_body: gemini_req_body["generation_config"] = {}
-                gemini_req_body["generation_config"]["response_mime_type"] = "application/json"
+                # Ensure generation_config exists and is a types.GenerationConfig object
+                if "generation_config" not in gemini_req_body or gemini_req_body["generation_config"] is None:
+                    gemini_req_body["generation_config"] = types.GenerationConfig()
+                # Set the response_mime_type attribute on the GenerationConfig object
+                gemini_req_body["generation_config"].response_mime_type = "application/json"
 
             response = await make_request_with_fast_failover(db, rate_limiter, gemini_req_body, temp_req, model_name, user_key_info, _internal_call=True)
             content = response['choices'][0]['message']['content']
