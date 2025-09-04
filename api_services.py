@@ -2345,7 +2345,7 @@ async def _execute_deepthink_preprocessing(
     async def _execute_sub_request(prompt: str, is_json: bool = False):
         try:
             temp_req = ChatCompletionRequest(model=original_request.model, messages=[ChatMessage(role="user", content=prompt)])
-            gemini_req_body = openai_to_gemini(temp_req, db, anti_detection, file_storage, enable_anti_detection)
+            gemini_req_body = openai_to_gemini(db, temp_req, anti_detection, file_storage, enable_anti_detection)
             if is_json:
                 if "generation_config" not in gemini_req_body: gemini_req_body["generation_config"] = {}
                 gemini_req_body["generation_config"]["response_mime_type"] = "application/json"
